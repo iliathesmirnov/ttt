@@ -40,19 +40,17 @@ const int STEP = 1;
 const bool QRAND = false;			// Randomize initial Q-values?
 bool DEPTHVERBOSE = true;	  		// Include outputs regarding game depth?
 
-const int DQN_EPOCHS = 5000000;
+const int DQN_EPOCHS = 6000000;
 double DQN_ALPHA = 25e-5;
-const int DQN_ALPHA_UPDATE_FREQ = 5000000;
+const int DQN_ALPHA_UPDATE_FREQ = 2000000;
 const double DQN_GAMMA = 0.9;
 const double DQN_EPSILON = 0.1;
 const double LEAK = 0.01;
 const int BUFFER_CAPACITY = 300000;
 const int TARGET_UPDATE_FREQUENCY = 30000;
-//const int BUFFER_CAPACITY = 100000;
-//const int TARGET_UPDATE_FREQUENCY = 10000;
 const int MINIBATCH_SIZE = 32;
 const int LAYERS = 4;
-int NODES_IN_LAYER[LAYERS] = {CELLS, 8, 8, CELLS+1};
+int NODES_IN_LAYER[LAYERS] = {CELLS, 64, 64, CELLS+1};
 const int DQN_K = 1;
 
 const int INPUT_LAYER = 0;
