@@ -1,5 +1,6 @@
 //		This program implements the minimax algorithm for playing tic-tac-toe, with
 //		alpha-beta pruning. It also implements tabular Q-learning, and DQN.
+//		Author: Ilia Smirnov
 
 #include<iostream>
 #include<fstream>
@@ -25,11 +26,10 @@ const int CELLS = ROWS * COLMS;
 const int LINES = ROWS + COLMS + 2;
 const int BOARDS = 19683;
 
-enum strategy {MINIMAX, RANDOM, Q, OPTIBOT, DOUBLEQ, DQN};
-const int COMPSTRAT = 5;
-const int COMPOPP = 2;
+enum strategy {MINIMAX, RANDOM, QTAB, HEURIBOT, DOUBLEQ, DQN};
+strategy COMPSTRAT, COMPOPP;
 
-const int EPOCHS = 3000000;			// Epochs of Tabular Q-training
+const int EPOCHS = 1500000;			// Epochs of Tabular Q-training
 const int EPOCHSTEP = 1000;			// How frequently training plot is updated
 
 const float ITERS = 20000.0;
@@ -38,28 +38,36 @@ const float NUMBATTLES = 100000.0;		// Number of games in a battle
 const int EPISODES = 350;
 const int STEP = 1;
 const bool QRAND = false;			// Randomize initial Q-values?
-const bool DEPTHVERBOSE = false;		// Include outputs regarding game depth?
+bool DEPTHVERBOSE = true;	  		// Include outputs regarding game depth?
 
-//double DQN_ALPHA = 0.0005;
-double DQN_ALPHA = 0.0025;
+const int DQN_EPOCHS = 5000000;
+double DQN_ALPHA = 25e-5;
+const int DQN_ALPHA_UPDATE_FREQ = 5000000;
 const double DQN_GAMMA = 0.9;
 const double DQN_EPSILON = 0.1;
-const double LEAK = 0.00;
-const int DQN_EPOCHS = 10000000;
-const int BUFFER_CAPACITY = 10000;
-const int TARGET_UPDATE_FREQUENCY = 5000;
+const double LEAK = 0.01;
+const int BUFFER_CAPACITY = 300000;
+const int TARGET_UPDATE_FREQUENCY = 30000;
+//const int BUFFER_CAPACITY = 100000;
+//const int TARGET_UPDATE_FREQUENCY = 10000;
 const int MINIBATCH_SIZE = 32;
-const int LAYERS = 5;
-int NODES_IN_LAYER[LAYERS] = {CELLS, 64, 64, 64, CELLS+1};	// The last node in the output layer should be ignored
-                                                                // (Just there to avoid writing some special cases later.)
+const int LAYERS = 4;
+int NODES_IN_LAYER[LAYERS] = {CELLS, 8, 8, CELLS+1};
+const int DQN_K = 1;
+
 const int INPUT_LAYER = 0;
 const int OUTPUT_LAYER = LAYERS-1;
-const double RMS_PROP_MOMENTUM = 0.9;
-const double ADAM_MOMENTUM = 0.99;
+
+enum Opti_type {SGD, SGDM, ADAM, RMS_PROP};
+const Opti_type OPTI_TYPE = ADAM;
+const double SGD_MOMENTUM = 0.9;
+const double RMS_PROP_MOMENTUM = 0.95;
+const double ADAM_MOMENT1 = 0.9;
+const double ADAM_MOMENT2 = 0.999;
 const double ONE_MINUS_RMS_PROP_MOMENTUM = 1 - RMS_PROP_MOMENTUM;
-const double ONE_MINUS_ADAM_MOMENTUM = 1 - ADAM_MOMENTUM;
-const double DQN_INIT_STDEV = 0.1;
-const int DQN_K = 10;
+const double ONE_MINUS_ADAM_MOMENT1 = 1 - ADAM_MOMENT1;
+const double ONE_MINUS_ADAM_MOMENT2 = 1 - ADAM_MOMENT2;
+const double DQN_INIT_STDEV = 0.001;
 
 class Board;
 class Q_values;
@@ -85,20 +93,13 @@ double ReLUprime(double input);
 double clip(double num, double low, double high);
 
 //   =======================================================================
-// Optibot information
-const int CORNER[4] = {0, 2, 6, 8};					// Corner cells
-const int OPPOSITECORNER[4] = {8, 6, 2, 0};				// Opposite corners from corner cells
-const int SIDE[4] = {1, 3, 5, 7};					// Side cells
-const int CENTER = 4; 							// The center
-const vector<int> LINESTHROUGHCELL[9] =       { {0, 3, 6}, 		//
-						{1, 3}, 		// Ids of lines passing through each
-						{2, 3, 7}, 		// of the board cells
-						{0, 4},			//
-						{1, 4, 6, 7},
-						{2, 4},
-						{0, 5, 7},
-						{1, 5},
-						{2, 5, 6} };
+int line_cell_to_board_cell (int line, int line_cell);
+int board_cell_to_line_cell (int cell, int line);
+
+//   =======================================================================
+// Passing between boards and hashes
+int turn_to_ternary (int turn);
+int lpos_to_hash(int lpos[]);
 
 enum optibot_strategy { WIN,
 		        BLOCK_WIN,
@@ -110,13 +111,6 @@ enum optibot_strategy { WIN,
 			CORNER_MOVE,
 			SIDE_MOVE,
 			NO_MOVE };
-
-int line_cell_to_board_cell (int line, int line_cell);
-int board_cell_to_line_cell (int cell, int line);
-//   =======================================================================
-// Passing between boards and hashes
-int turn_to_ternary (int turn);
-int lpos_to_hash(int lpos[]);
 
 
 // *********************************************************************************
@@ -213,8 +207,8 @@ public:
 	int find_opti_move();
 	void compute_opti_move();
 	int DQ_move;
-	int next_move (int strat);
-	Node* next_move_node (int strat);
+	int next_move (strategy strat);
+	Node* next_move_node (strategy strat);
 	Node();
 	Node(Board init_board);
 	Node(int init_board_index);
@@ -285,38 +279,35 @@ private:
 	// Q-learning parameters
 	int cur_ep = 0;
 
-	float initALPHA;
-	float initGAMMA;
-	float initEPSILON;
+	float initALPHA, initGAMMA, initEPSILON;
 
 	int EXPLOREBDRY = EPOCHS / 3;
 	int EXPLOREBDRYSTEP = EXPLOREBDRY / 9;
 public:
 	float ALPHA, GAMMA, EPSILON;
 	Game_tree tree;
-	int next_training_move(Node* cur, float random, bool d);
 	void train(int eps = EPISODES);
 	void train_double(int eps = EPISODES);
 	void reset_Q();
 	void reset_double_Q();
 	void reset_hypers();
-	wlt battle(int plstrat, int oppstrat);
-	float_wlt battle(int plstrat, int oppstrat, int numit);
-	string get_plot_data (int ep, int epstep, int numit, bool d = false, bool wrec = true, bool lrec = true, bool trec = true)
-	string get_plot_data_avg_w_stdev (int ep, int epstep, int numit, bool d = false, bool wrec = true, bool lrec = true, bool trec = true)
-	vector<string> get_plot_data_w_stdev (int ep, int epstep, int numit, bool d = false, bool wrec = true, bool lrec = true, bool trec = true)
+	wlt battle(strategy plstrat, strategy oppstrat);
+	float_wlt battle(strategy plstrat, strategy oppstrat, int numit);
+	string get_plot_data (int ep, int epstep, int numit, bool d = false, bool wrec = true, bool lrec = true, bool trec = true);
+	string get_plot_data_avg_w_stdev (int ep, int epstep, int numit, bool d = false, bool wrec = true, bool lrec = true, bool trec = true);
+	vector<string> get_plot_data_w_stdev (int ep, int epstep, int numit, bool d = false, bool wrec = true, bool lrec = true, bool trec = true);
 
 	Q_trainer (float a=0.1, float g=0.9, float e=0.5);
 	Q_trainer (float a, float g, float e, int epsbdry);
 };
 
 class Battler {
-	wlt battle(int plstrat, int oppstrat);
-	float_wlt battle(int plstrat, int oppstrat, int numit);
+	wlt battle(strategy plstrat, strategy oppstrat);
+	float_wlt battle(strategy plstrat, strategy oppstrat, int numit);
 
 	string get_plot_data (int ep, int epstep, int numit, bool d = false, bool wrec = true, bool lrec = true, bool trec = true);
 	string get_plot_data_avg_w_stdev (int ep, int epstep, int numit, bool d = false, bool wrec = true, bool lrec = true, bool trec = true);
-	vector<string> get_plot_data_w_stdev (int ep, int epstep, int numit, bool d = false, bool wrec = true, bool lrec = true, bool trec = true)
+	vector<string> get_plot_data_w_stdev (int ep, int epstep, int numit, bool d = false, bool wrec = true, bool lrec = true, bool trec = true);
 };
 
 struct wlt {
@@ -346,11 +337,11 @@ private:
 	void print_minimax_board_to_html (Board board, ofstream& to, bool small = true);
 	void print_Q_board_to_html (double lpos[], int turn, ofstream& to, bool small = true);
 public:
-	void output_html_strategy_table (char file_name[]);
+	void output_html_strategy_table (char file_name[], bool breadth);
 };
 
-void fillStrat(Board* board_pointer, int strat[]);
 void fillQStrat(Node* node, vector<int>* strat_pointer, ofstream& to3);
+void fill_strat(Game_tree& tree, int* strat_table, strategy STRAT);
 
 struct FF_input {
 	double value;
@@ -395,15 +386,19 @@ private:
 
 	double ALPHA = DQN_ALPHA;
 
-	// RMSProp and Adam data
-	double v[LAYERS][128][128];
-	double s[LAYERS][128][128];
+	// Optimizer data
+	double s[4][128][128];
+	double CUR_ADAM_MOMENT1 = ADAM_MOMENT1, CUR_ADAM_MOMENT2 = ADAM_MOMENT2;
+	double m[4][128][128];
+	double v[4][128][128];
+	double m_est, v_est;
 public:
 	void input_game_node (Node* node);
 	void forward_pass ();
 	void backward_pass (int action[], double value[], double target[], int batch_size = MINIBATCH_SIZE);
 
 	void fit_minimax(Game_tree* tree);
+	void store_weights(ofstream& to);
 	void display();
 
 	Neural_net();
@@ -437,13 +432,389 @@ public:
 	void fill_buffer(int capacity = BUFFER_CAPACITY);
 	void train(int epochs = DQN_EPOCHS);
 	double max_DQ (int valid_cell[], Neural_net* action_net);
+	double min_DQ (int valid_cell[], Neural_net* action_net);
 	int max_DQ_action (int valid_cell[], Neural_net* net);
+	int min_DQ_action (int valid_cell[], Neural_net* net);
 	void store_DQ_actions(Game_tree* tree);
-
+	void store_weights(ofstream& to);
 	DQN_trainer(Game_tree* tree);
 };
 
 typedef tuple<int,int,int> minimax_point;
+
+
+// *********************************************************************************
+// *********************************************************************************
+// ******     ***       ***      ****      *********   ***     **     **************
+// ******     ** **   ** **     **  **         *       ** **   **     **************
+// ******     **  ** **  **    **    **        *       **  **  **     **************
+// ******     **   ***   **   **********       *       **   ** **     **************
+// ******     **         **  **        **  *********   **     ***     **************
+// *********************************************************************************
+// *********************************************************************************
+
+
+int main(int argc, char* argv[]) {
+	cout << fixed << setprecision(3);
+	srand (time(NULL));
+
+//====== DQN Training =====================================================
+	Game_tree tree;
+	Neural_net net;
+	ofstream to (argv[1]);
+
+	Q_trainer Q, X_best, O_best;
+	wlt x_ledger, o_ledger;
+//	Tree_crawler crawler = Tree_crawler(&(Q.tree));
+//	net.fit_minimax(&tree);
+//	crawler.compute_utilities();
+//	Q.train(EPOCHS);
+
+	DQN_trainer tr(&Q.tree);
+	tr.fill_buffer();
+	float best_wr = -INFTY, cur_wr;
+        std::string x_rec = "", o_rec = "";
+	for (int i = 0; i < DQN_EPOCHS/1000; i++) {
+		cout << i << " 000" << endl;
+		tr.train(1000);
+		tr.store_DQ_actions(&Q.tree);
+		x_ledger = Q.battle(DQN, RANDOM);
+		std::cout << "W: " << x_ledger.w << "  L: " << x_ledger.l << "  T: " << x_ledger.t << std::endl;
+                x_rec += std::to_string(i) + "000 " + std::to_string(x_ledger.w) + ",";
+		o_ledger = Q.battle(RANDOM, DQN);
+		std::cout << "W: " << o_ledger.w << "  L: " << o_ledger.l << "  T: " << o_ledger.t << std::endl;
+                o_rec += std::to_string(i) + "000 " + std::to_string(o_ledger.l) + ",";
+                cur_wr = (x_ledger.w + o_ledger.l) - (x_ledger.l + o_ledger.w);
+                if (cur_wr > best_wr) {
+			best_wr = cur_wr;
+                	tr.store_DQ_actions(&X_best.tree);
+		}
+	}
+	to << x_rec << ";" << o_rec << ";!";
+
+	std::cout << "DQN v. minimax" << std::endl;
+        X_best.battle(DQN, MINIMAX, 1000);
+	std::cout << "minimax v. DQN" << std::endl;
+        X_best.battle(MINIMAX, DQN, 1000);
+	std::cout << "DQN v. random" << std::endl;
+        X_best.battle(DQN, RANDOM, 1000);
+	std::cout << "random v. DQN" << std::endl;
+        X_best.battle(RANDOM, DQN, 1000);
+
+	to << "Alpha: " << DQN_ALPHA << endl;
+	to << "Gamma: " << DQN_GAMMA << endl;
+	to << "Epsilon: " << DQN_EPSILON << endl;
+	to << "Minibatch: " << MINIBATCH_SIZE << endl;
+	to << "Buffer capacity: " << BUFFER_CAPACITY << endl;
+	to << "Leak: " << LEAK << endl;
+	to << "Target update freq.: " << TARGET_UPDATE_FREQUENCY << endl;
+	to << "No. layers: " << LAYERS << endl;
+	for (int i = 0; i < LAYERS; i++) {
+		to << NODES_IN_LAYER[i] << " " ;
+	}
+        to << endl;
+        to << "Optimizer: " << OPTI_TYPE;
+
+	to.close();
+
+// ==== Strategy export =============================================================
+	ofstream wr(argv[2]);
+	int strat_table[BOARDS];
+        fill_strat(X_best.tree, strat_table, DQN);
+        for (int i = 0; i < BOARDS; i++)
+            wr << strat_table[i] << " ";
+        wr << ".";
+        wr.close();
+
+// ==== Weights export =============================================================
+	ofstream strat_writer(argv[3]);
+	tr.store_weights(strat_writer);
+	strat_writer.close();
+
+
+/*
+//======= Battling every pair of agents ===================================
+	Q_trainer Q(1, 0.999, 1);
+	Q.tree.compute_utilities();
+	Tree_crawler crawler = Tree_crawler(&Q.tree);
+	crawler.compute_opti_moves();
+        Q.train_double(3000000);
+	std::cout << "Random v. Qtab" << std::endl;
+	Q.battle(RANDOM, DOUBLEQ, 1000);
+	std::cout << "Qtab v. Random" << std::endl;
+	Q.battle(DOUBLEQ, RANDOM, 1000);
+	std::cout << "Minimax v. Qtab" << std::endl;
+	Q.battle(MINIMAX, DOUBLEQ, 1000);
+	std::cout << "Qtab v. Minimax" << std::endl;
+	Q.battle(DOUBLEQ, MINIMAX, 1000);
+	std::cout << "Heuribot v. Qtab" << std::endl;
+	Q.battle(HEURIBOT, DOUBLEQ, 1000);
+	std::cout << "Qtab v. Heuribot" << std::endl;
+	Q.battle(DOUBLEQ, HEURIBOT, 1000);
+	std::cout << "Minimax v. Random" << std::endl;
+	Q.battle(MINIMAX, RANDOM, 1000);
+	std::cout << "Random v. Minimax" << std::endl;
+	Q.battle(RANDOM, MINIMAX, 1000);
+	std::cout << "Minimax v. Heuribot" << std::endl;
+	Q.battle(MINIMAX, HEURIBOT, 1000);
+	std::cout << "Heuribot v. Minimax" << std::endl;
+	Q.battle(HEURIBOT, MINIMAX, 1000);
+	std::cout << "Heuribot v. Random" << std::endl;
+	Q.battle(HEURIBOT, RANDOM, 1000);
+	std::cout << "Random v. Heuribot" << std::endl;
+	Q.battle(RANDOM, HEURIBOT, 1000);
+*/
+
+/*
+// ===== Generate strategy tables ===================================================
+	Exporter exp;
+	exp.output_html_strategy_table(argv[1], true);
+*/
+
+/*
+// =========== Recording performance of Tabular Q ==========================
+	Q_trainer Q(1, 0.9, 1);
+	COMPSTRAT = DOUBLEQ;
+	COMPOPP = RANDOM;
+
+	Tree_crawler cr(&Q.tree);
+	if (COMPOPP == MINIMAX) cr.compute_utilities();
+	if (COMPOPP == HEURIBOT) cr.compute_opti_moves();
+	if (COMPOPP == QTAB) { Q.reset_Q(); Q.reset_hypers(); Q.train(5000000); }
+	if (COMPOPP == DOUBLEQ) { Q.reset_double_Q(); Q.reset_hypers(); Q.train_double(5000000); }
+
+	string record = Q.get_plot_data_avg_w_stdev (EPOCHS, EPOCHSTEP, 50,
+                                                     // Should DOUBLEQ or QTAB be trained?
+                                                     COMPSTRAT == DOUBLEQ,
+                                                     // Record wins?
+                                                     COMPOPP == RANDOM,
+                                                     // Record losses?
+                                                      false,
+                                                     // Record ties?
+                                                      COMPOPP != RANDOM);
+
+	cout << Q.ALPHA << endl;
+	cout << Q.GAMMA << endl;
+	cout << Q.EPSILON << endl;
+
+	ofstream to (argv[1]);
+	to << record;
+	to << "!";
+	to.close();
+*/
+	return 0;
+}
+
+// *********************************************************************************
+// *********************************************************************************
+// **************** Neural network classes *****************************************
+
+void FF_node::compute() {
+	value = 0.0;
+	for (int w = 0; w < num_inputs; w++) {
+		value += input[w].value * input[w].weight;
+	}
+	output = ReLU(value);
+}
+
+FF_node::~FF_node() {
+	//delete []input;
+	input = NULL;
+}
+
+FF_layer::FF_layer(){
+}
+
+FF_layer::FF_layer(int value[], int num_nodes) {
+	node = new FF_node[num_nodes];
+	for (int n = 0; n < num_nodes; n++) node[n].value = value[n];
+}
+
+FF_layer::FF_layer(double value[], int num_nodes) {
+	node = new FF_node[num_nodes];
+	for (int n = 0; n < num_nodes; n++) node[n].value = value[n];
+}
+
+void FF_layer::enter (int value[]) {
+	for (int n = 0; n < num_nodes; n++) node[n].value = value[n];
+}
+
+void FF_layer::enter (double value[]) {
+	for (int n = 0; n < num_nodes; n++) node[n].value = value[n];
+}
+
+FF_layer::~FF_layer() {
+	//delete []node;
+	node = NULL;
+}
+
+Neural_net::Neural_net() {
+	default_random_engine gen;
+	normal_distribution<double> dist(0, DQN_INIT_STDEV);
+
+	for (int l = 0; l < LAYERS; l++) {
+		layer[l].num_nodes = NODES_IN_LAYER[l];
+		layer[l].node = new FF_node[layer[l].num_nodes];
+
+		if (l != INPUT_LAYER) {
+			for (int n = 0; n < layer[l].num_nodes; n++) {
+				layer[l].node[n].value = dist(gen);
+				layer[l].node[n].num_inputs = layer[l-1].num_nodes;
+				layer[l].node[n].input = new FF_input[layer[l].node[n].num_inputs];
+
+				for (int w = 0; w < layer[l].node[n].num_inputs; w++) {
+					layer[l].node[n].input[w].value = dist(gen);
+					layer[l].node[n].input[w].weight = dist(gen);
+				}
+			}
+			// Set up the bias node
+				layer[l].node[ layer[l].num_nodes-1 ].value = 0;
+				layer[l].node[ layer[l].num_nodes-1 ].output = 1.0;
+	}	}
+	max_nodes = 0;
+	for (int l = 0; l < LAYERS; l++) {
+		if (NODES_IN_LAYER[l] > max_nodes) max_nodes = NODES_IN_LAYER[l];
+	}
+
+	for (int l = 0; l < 4; l++) {
+		for (int n = 0; n < layer[l].num_nodes; n++) {
+			for (int w = 0; w < layer[l].node[w].num_inputs; w++) {
+				s[l][n][w] = 0.0;
+				v[l][n][w] = 0.0;
+                                m[l][n][w] = 0.0;
+	} 	}	 }
+
+}
+
+void Neural_net::display() {
+	for (int r = 0; r < max_nodes; r++) {
+		for (int l = 0; l < LAYERS; l++) {
+			if (r < layer[l].num_nodes) cout << layer[l].node[r].value << " (" << layer[l].node[r].output << "), ";
+			else cout << "      N,      ";
+		}
+		cout << endl;
+	}
+}
+
+void Neural_net::input_game_node (Node* node) {
+	layer[INPUT_LAYER_INDEX].enter ( node->board.lpos );
+}
+
+void Neural_net::forward_pass(){
+	// Prepare input layer
+	for (int n = 0; n < layer[INPUT_LAYER_INDEX].num_nodes; n++) {
+		layer[INPUT_LAYER_INDEX].node[n].output = layer[INPUT_LAYER_INDEX].node[n].value;
+	}
+	// Copy outputs of previous layer to inputs of previous layer and compute node values
+	for (int l = 1; l < LAYERS; l++) {
+		for (int n = 0; n < layer[l].num_nodes-1; n++) {
+			for (int w = 0; w < layer[l].node[n].num_inputs; w++) {
+				layer[l].node[n].input[w].value = layer[l-1].node[w].output;
+			}
+			layer[l].node[n].compute();
+		}
+	}
+}
+
+void Neural_net::backward_pass(int a[], double value[], double target[], int batch_size){
+	double delta[LAYERS][max_nodes];
+	double dw[LAYERS][max_nodes][max_nodes];
+	double diff = 0.0;
+
+	for (int l = 0; l < LAYERS; l++) {
+		for (int n = 0; n < layer[l].num_nodes; n++) {
+			for (int w = 0; w < layer[l].node[n].num_inputs; w++) {
+				dw[l][n][w] = 0.0;
+			}
+		}
+	}
+
+	// Compute error gradients of the minibatch
+	for (int batch = 0; batch < batch_size; batch++) {
+
+		for (int l = 0; l < LAYERS; l++) {
+			for (int n = 0; n < layer[l].num_nodes; n++) {
+				delta[l][n] = 0.0;
+		}	}
+
+		delta[OUTPUT_LAYER][a[batch]] = -(target[batch] - value[batch]);
+	        delta[OUTPUT_LAYER][a[batch]] = clip( delta[OUTPUT_LAYER][a[batch]], -1.0, 1.0);
+		// Back-propagate
+		for (int l = OUTPUT_LAYER - 1; l > 0; l--) {
+			for (int n = 0; n < layer[l].num_nodes; n++) {
+				for (int m = 0; m < layer[l+1].num_nodes; m++) {
+					delta[l][n] += layer[l+1].node[m].input[n].weight  * delta[l+1][m];
+				}
+				delta[l][n] *= ReLUprime( layer[l].node[n].value );
+			}
+		}
+
+		for (int l = 1; l < LAYERS; l++) {
+			for (int n = 0; n < layer[l].num_nodes; n++) {
+				for (int w = 0; w < layer[l].node[n].num_inputs; w++) {
+					dw[l][n][w] += layer[l-1].node[w].output * delta[l][n]  * ((double) 1/MINIBATCH_SIZE);
+				}
+			}
+		}
+	}
+
+	if (OPTI_TYPE == ADAM) {
+		CUR_ADAM_MOMENT1 *= ADAM_MOMENT1;
+		CUR_ADAM_MOMENT2 *= ADAM_MOMENT2;
+	}
+
+	for (int l = 1; l < LAYERS; l++) {
+		for (int n = 0; n < layer[l].num_nodes; n++) {
+			for (int w = 0; w < layer[l].node[n].num_inputs; w++) {
+				//dw[l][n][w] = clip(dw[l][n][w], -1.0, 1.0);
+
+				switch(OPTI_TYPE) {
+					case SGD    :    layer[l].node[n].input[w].weight -= ALPHA * dw[l][n][w];
+                                                         break;
+                                        case SGDM   :    s[l][n][w] = SGD_MOMENTUM * s[l][n][w] + ALPHA * dw[l][n][w];
+                                                         layer[l].node[n].input[w].weight -= s[l][n][w];
+                                                         break;
+                                        case RMS_PROP    :    s[l][n][w] = RMS_PROP_MOMENTUM * s[l][n][w] + ONE_MINUS_RMS_PROP_MOMENTUM*dw[l][n][w]*dw[l][n][w];
+					                      layer[l].node[n].input[w].weight -= ALPHA * (1/(sqrt(s[l][n][w]+0.01))) * dw[l][n][w];
+							      break;
+					case ADAM    :	  m[l][n][w] = ADAM_MOMENT1 * m[l][n][w] + ONE_MINUS_ADAM_MOMENT1 * dw[l][n][w];
+					                  v[l][n][w] = ADAM_MOMENT2 * v[l][n][w] + ONE_MINUS_ADAM_MOMENT2 * dw[l][n][w] * dw[l][n][w];
+	   	                          		  m_est = m[l][n][w] / (1 - CUR_ADAM_MOMENT1);
+					                  v_est = v[l][n][w] / (1 - CUR_ADAM_MOMENT2);
+ 				                          layer[l].node[n].input[w].weight -= ALPHA * m_est / (sqrt(v_est) + 0.000001);
+                                                          break;
+				}
+			}
+		}
+	}
+}
+
+double ReLU(double input) {
+	if (input < 0) return LEAK * input;
+	else return input;
+}
+
+double ReLUprime(double input) {
+	if (input < 0) return LEAK;
+	else return 1;
+}
+
+double clip (double num, double low, double high) {
+	num = max(low, num);
+	num = min(high, num);
+	return num;
+}
+
+void Neural_net::store_weights(ofstream& to) {
+	for (int l = 1; l < LAYERS; l++) {
+		for (int n = 0; n < NODES_IN_LAYER[l]; n++) {
+			for (int m = 0; m < NODES_IN_LAYER[l-1]; m++) {
+				to << std::to_string(layer[l].node[n].input[m].weight) << " ";
+			}
+		}
+	}
+	to << "!";
+}
 
 void Neural_net::fit_minimax(Game_tree* tree) {
 	Tree_crawler crawler = Tree_crawler(tree);
@@ -466,7 +837,7 @@ void Neural_net::fit_minimax(Game_tree* tree) {
 		if (!node->board.is_terminal()) {
 			for (int i = 0; i < CELLS; i++) {
 				if (node->board.lpos[i] == 0) {
-					data.push_back( make_tuple(node->hash, i, node->children[node->find_child_by_cell(i)]->utility) );  
+					data.push_back( make_tuple(node->hash, i, node->children[node->find_child_by_cell(i)]->utility) );
 				}
 			}
 
@@ -550,6 +921,9 @@ void Neural_net::fit_minimax(Game_tree* tree) {
 
 }
 
+// ==============================================================================
+// ========================== DQN Trainer =======================================
+
 void DQN_trainer::store_DQ_actions (Game_tree* tree) {
 	Tree_crawler crawler = Tree_crawler(tree);
 	crawler.reset_visits();
@@ -565,7 +939,11 @@ void DQN_trainer::store_DQ_actions (Game_tree* tree) {
 		if (!node->board.is_terminal()) {
 			trainer.layer[INPUT_LAYER].enter(node->board.lpos);
 			trainer.forward_pass();
-			node->DQ_move = node->find_child_by_cell(max_DQ_action(node->board.lpos, &trainer));
+			node->DQ_move = node->find_child_by_cell(
+	                                        node->board.get_turn() == 1 ?
+  						max_DQ_action(node->board.lpos, &trainer) :
+						min_DQ_action(node->board.lpos, &trainer)
+                                        );
 			for (int i = 0; i <= node->last_child; i++) {
 				if (!crawler.visited_node[node->children[i]->hash]) {
 					node_queue.push(node->children[i]);
@@ -589,23 +967,23 @@ DQN_trainer::Buffer::Buffer (Game_tree* tree) {
 
 void DQN_trainer::Buffer::fill (int capacity) {
 	int n = 0, a, b, r;
-	Node* cur = &(tree->root_node);
-	Node* next;
+	Node *cur = &(tree->root_node), *mid, *next;
 	Transition trans = Transition(cur, cur, 0, 0);
 
-	while (n <= capacity) {
+	while (n < capacity) {
 		cur = &(tree->root_node);
+		a = rand() % (cur->last_child + 1);
+		mid = cur->children[a];
 		while (!cur->board.is_terminal()) {
-			a = rand() % (cur->last_child + 1);
-			next = cur->children[a];
-
-			if (!next->board.is_terminal()) {
-				b = rand() % (next->last_child + 1);
-				next = next->children[b];
+			if (!mid->board.is_terminal()) {
+				b = rand() % (mid->last_child + 1);
+				next = mid->children[b];
 			}
+			else next = mid;
+
 			trans = Transition(cur, next, a, next->board.get_reward());
 			transition.push_back(trans);
-			cur = next;
+			cur = mid;  mid = next;  a = b;
 			n++;
 		}
 	}
@@ -668,7 +1046,7 @@ void DQN_trainer::train (int epochs) {
 	mt19937 gen(rdev());
 	uniform_real_distribution<> dis(0, 1.0);
 
-	Node *cur = &(tree->root_node), *next, *next_rand;
+	Node *cur = &(tree->root_node), *mid, *next;
 	int a, b;
 	Transition trans = Transition(cur, cur, 0, 0);
 	double DQ_target;
@@ -677,30 +1055,27 @@ void DQN_trainer::train (int epochs) {
 	double DQ_value_batch[MINIBATCH_SIZE];
 	double target_batch[MINIBATCH_SIZE];
 
-
 	for (int ep = 0; ep < epochs; ep++) {
 		cur = &(tree->root_node);
+                if (dis(gen) < EPSILON) a = rand() % (cur->last_child + 1);
+		else a = cur->find_child_by_cell(max_DQ_action(cur->board.lpos, &trainer));
+		mid = cur->children[a];
 
 		while(!cur->board.is_terminal()) {
-			random = dis(gen);
-			//if (random < EPSILON)
-			if (false)
-				a = rand() % (cur->last_child + 1);
-			else {
-				trainer.layer[INPUT_LAYER].enter(cur->board.lpos);
-				trainer.forward_pass();
-				a = cur->find_child_by_cell(max_DQ_action(cur->board.lpos, &trainer));
+			if (!mid->board.is_terminal()) {
+				if (dis(gen) < EPSILON) b = rand() % (mid->last_child + 1);
+				else mid->board.get_turn() == 1 ?
+					b = mid->find_child_by_cell(max_DQ_action(mid->board.lpos, &trainer)) :
+					b = mid->find_child_by_cell(min_DQ_action(mid->board.lpos, &trainer));
+				next = mid->children[b];
 			}
-			next = cur->children[a];
-			if (!next->board.is_terminal()) {
-				//b = rand() % (next->last_child + 1);		// Opponent moves randomly for now
-				b = next->next_move( (t % 3)+1  );
-				next = next->children[b];
-			}
+			else next = mid;
+
 			trans = Transition(cur, next, a, next->board.get_reward());
 			replay_buffer.transition.pop_front();
 			replay_buffer.transition.push_back(trans);
-			cur = next;
+			cur = mid;  mid = next;  a = b;
+
 			for (int batch = 0; batch < MINIBATCH_SIZE; batch++) {
 				if (dis(gen) < EPSILON) {
 					batch_draw = rand() % random_buffer.transition.size();
@@ -715,14 +1090,16 @@ void DQN_trainer::train (int epochs) {
 				else {
 					trainer.layer[INPUT_LAYER].enter(trans.next->board.lpos);
 					trainer.forward_pass();
-					DQ_target = GAMMA*max_DQ(trans.next->board.lpos, &trainer);
+					DQ_target = GAMMA *
+						    (trans.cur->board.get_turn() == 1 ?
+						     max_DQ(trans.next->board.lpos, &trainer) :
+						     min_DQ(trans.next->board.lpos, &trainer));
 				}
 				trainer.layer[INPUT_LAYER].enter(trans.cur->board.lpos);
 				trainer.forward_pass();
-				action_batch[batch] = cur->children_cells[trans.a];
-				DQ_value_batch[batch] = trainer.layer[OUTPUT_LAYER].node[cur->children_cells[trans.a]].value;
+				action_batch[batch] = trans.cur->children_cells[trans.a];
+				DQ_value_batch[batch] = trainer.layer[OUTPUT_LAYER].node[action_batch[batch]].value;
 				target_batch[batch] = DQ_target;
-
 			}
 			trainer.backward_pass(action_batch, DQ_value_batch, target_batch);
 		}
@@ -731,6 +1108,7 @@ void DQN_trainer::train (int epochs) {
 			target.push_back(trainer);
 		}
 		t++;
+                if (t % (DQN_ALPHA_UPDATE_FREQ) == 0) trainer.ALPHA *= 0.1;
 	}
 }
 
@@ -747,7 +1125,20 @@ double DQN_trainer::max_DQ (int lpos[], Neural_net* action_net) {
 		avg_Q[cell] *= ((double) 1/DQN_K );
 
 	return avg_Q [ max_DQ_action(lpos, action_net) ];
-	//return value_net->layer[OUTPUT_LAYER].node[ max_DQ_action(lpos, action_net) ].value;
+}
+
+double DQN_trainer::min_DQ (int lpos[], Neural_net* action_net) {
+	for (int cell; cell < CELLS; cell++)
+		avg_Q[cell] = 0.0;
+	for (int i = 0; i < DQN_K; i++) {
+		target[i].layer[INPUT_LAYER].enter(lpos);
+		target[i].forward_pass();
+		for (int cell; cell < CELLS; cell++)
+			avg_Q[cell] += target[i].layer[OUTPUT_LAYER].node[cell].value;
+	}
+	for (int cell = 0; cell < CELLS; cell++)
+		avg_Q[cell] *= ((double) 1/DQN_K);
+	return avg_Q[min_DQ_action(lpos, action_net)];
 }
 
 int DQN_trainer::max_DQ_action (int lpos[], Neural_net* net) {
@@ -768,309 +1159,30 @@ int DQN_trainer::max_DQ_action (int lpos[], Neural_net* net) {
 	return max_action;
 }
 
-// *********************************************************************************
-// *********************************************************************************
-// ******     ***       ***      ****      *********   ***     **     **************
-// ******     ** **   ** **     **  **         *       ** **   **     **************
-// ******     **  ** **  **    **    **        *       **  **  **     **************
-// ******     **   ***   **   **********       *       **   ** **     **************
-// ******     **         **  **        **  *********   **     ***     **************
-// *********************************************************************************
-// *********************************************************************************
+int DQN_trainer::min_DQ_action (int lpos[], Neural_net* net) {
+	double min = INFTY;
+	int min_action = 0;
 
+	net->layer[INPUT_LAYER].enter(lpos);
+	net->forward_pass();
 
-int main(int argc, char* argv[]) {
-	cout << fixed << setprecision(3);
-
-	srand (time(NULL));
-
-/*
-	Q_trainer Q(1,1,1);
-	string record = Q.get_plot_data_avg_w_stdev (EPOCHS, EPOCHSTEP, 10, true, true, false, false);
-
-	//Q_trainer Q(0.1,1,0.3);
-	//string record = Q.get_plot_data_avg_w_stdev (EPOCHS, EPOCHSTEP, 10, true, true, false, false);
-
-	cout << Q.ALPHA << endl;
-	cout << Q.GAMMA << endl;
-	cout << Q.EPSILON << endl;
-
-	ofstream to (argv[1]);
-	to << record;
-	to << "!";
-	to.close();
-*/
-
-
-
-	Game_tree tree;
-	Neural_net net;
-//	net.fit_minimax(&tree);
-	ofstream to (argv[1]);
-
-	Q_trainer Q;
-	wlt ledger;
-//	Tree_crawler crawler = Tree_crawler(&(Q.tree));
-//	crawler.compute_utilities();
-//	Q.train(EPOCHS);
-
-
-	DQN_trainer teach = DQN_trainer(&Q.tree);
-	teach.fill_buffer();
-
-	for (int i = 0; i < DQN_EPOCHS/1000; i++) {
-		cout << i << " 000" << endl;
-		teach.train(1000);
-		teach.store_DQ_actions(&Q.tree);
-		ledger = Q.battle(6, 2);
-		cout << "W: " << ledger.w << endl;
-		cout << "L: " << ledger.l << endl;
-		cout << "T: " << ledger.t << endl;
-		to << i << "000 " << ledger.w << ",";
-	}
-	to << ";!";
-
-	to << "Alpha: " << DQN_ALPHA << endl;
-	to << "Gamma: " << DQN_GAMMA << endl;
-	to << "Epsilon: " << DQN_EPSILON << endl;
-	to << "Minibatch: " << MINIBATCH_SIZE << endl;
-	to << "Buffer capacity: " << BUFFER_CAPACITY << endl;
-	to << "Leak: " << LEAK << endl;
-	to << "Target update freq.: " << TARGET_UPDATE_FREQUENCY << endl;
-	to << "No. layers: " << LAYERS << endl;
-	for (int i = 0; i < LAYERS; i++) {
-		to << NODES_IN_LAYER[i] << " " ;
-	}
-
-	to.close();
-
-
-/*
-	ofstream to (argv[1]);
-	ofstream to2 (argv[2]);
-	ofstream to3 (argv[3]);
-
-	Exporter exp;
-	exp.output_html_strategy_table(argv[3]);
-	Q_trainer Q = Q_trainer(1, 0.99, 1);
-	Q.tree.compute_utilities();
-	Tree_crawler crawler = Tree_crawler(&Q.tree);
-	crawler.compute_opti_moves();
-	Q.battle(4, 1, 1000);
-	Q.battle(1, 4, 1000);
-	Q.battle(1, 2, 1000);
-	Q.battle(4, 2, 1000);
-	Q.battle(4, 4, 1000);
-
-	// Export strategy
-	vector<int> strat(19683, 0);
-
-	fillQStrat(&Q.tree.root_node, &strat, to3);
-	for (int i = 0; i < 19683; i++) {
-		to2 << strat[i] << " ";
-	}
-		to2 << ".";
-
-	to.close();
-	to2.close();
-	to3.close();
-
-*/
-	return 0;
-}
-
-// *********************************************************************************
-// *********************************************************************************
-// *********************************************************************************
-// **************** Neural network classes *****************************************
-// *********************************************************************************
-
-void FF_node::compute() {
-	value = 0.0;
-	for (int w = 0; w < num_inputs; w++) {
-		value += input[w].value * input[w].weight;
-	}
-	output = ReLU(value);
-}
-
-FF_node::~FF_node() {
-	//delete []input;
-	input = NULL;
-}
-
-FF_layer::FF_layer(){
-}
-
-FF_layer::FF_layer(int value[], int num_nodes) {
-	node = new FF_node[num_nodes];
-	for (int n = 0; n < num_nodes; n++) node[n].value = value[n];
-}
-
-FF_layer::FF_layer(double value[], int num_nodes) {
-	node = new FF_node[num_nodes];
-	for (int n = 0; n < num_nodes; n++) node[n].value = value[n];
-}
-
-void FF_layer::enter (int value[]) {
-	for (int n = 0; n < num_nodes; n++) node[n].value = value[n];
-}
-
-void FF_layer::enter (double value[]) {
-	for (int n = 0; n < num_nodes; n++) node[n].value = value[n];
-}
-
-
-
-FF_layer::~FF_layer() {
-	//delete []node;
-	node = NULL;
-}
-
-Neural_net::Neural_net() {
-	default_random_engine gen;
-	normal_distribution<double> dist(0, DQN_INIT_STDEV);
-
-	for (int l = 0; l < LAYERS; l++) {
-		layer[l].num_nodes = NODES_IN_LAYER[l];
-		layer[l].node = new FF_node[layer[l].num_nodes];
-
-		if (l != INPUT_LAYER) {
-			for (int n = 0; n < layer[l].num_nodes; n++) {
-				layer[l].node[n].value = dist(gen);
-				layer[l].node[n].num_inputs = layer[l-1].num_nodes;
-				layer[l].node[n].input = new FF_input[layer[l].node[n].num_inputs];
-
-				for (int w = 0; w < layer[l].node[n].num_inputs; w++) {
-					layer[l].node[n].input[w].value = dist(gen);
-					layer[l].node[n].input[w].weight = dist(gen);
-				}
-			}
-			// Set up the bias node
-				layer[l].node[ layer[l].num_nodes-1 ].value = 0;
-				layer[l].node[ layer[l].num_nodes-1 ].output = 1.0;
-	}	}
-	max_nodes = 0;
-	for (int l = 0; l < LAYERS; l++) {
-		if (NODES_IN_LAYER[l] > max_nodes) max_nodes = NODES_IN_LAYER[l];
-	}
-
-	//v = new double[LAYERS][64][64];
-	for (int l = 0; l < LAYERS; l++) {
-		for (int n = 0; n < layer[l].num_nodes; n++) {
-			for (int w = 0; w < layer[l].node[w].num_inputs; w++) {
-				v[l][n][w] = 0.0;
-				s[l][n][w] = 0.0;
-	} 	}	 }
-
-}
-
-void Neural_net::display() {
-	for (int r = 0; r < max_nodes; r++) {
-		for (int l = 0; l < LAYERS; l++) {
-			if (r < layer[l].num_nodes) cout << layer[l].node[r].value << " (" << layer[l].node[r].output << "), ";
-			else cout << "      N,      ";
-		}
-		cout << endl;
-	}
-}
-
-void Neural_net::input_game_node (Node* node) {
-	layer[INPUT_LAYER_INDEX].enter ( node->board.lpos );
-}
-
-void Neural_net::forward_pass(){
-	// Prepare input layer
-	for (int n = 0; n < layer[INPUT_LAYER_INDEX].num_nodes; n++) {
-		layer[INPUT_LAYER_INDEX].node[n].output = layer[INPUT_LAYER_INDEX].node[n].value;
-	}
-	// Copy outputs of previous layer to inputs of previous layer and compute node values
-	for (int l = 1; l < LAYERS; l++) {
-		for (int n = 0; n < layer[l].num_nodes-1; n++) {
-			for (int w = 0; w < layer[l].node[n].num_inputs; w++) {
-				layer[l].node[n].input[w].value = layer[l-1].node[w].output;
-			}
-			layer[l].node[n].compute();
-		}
-	}
-}
-
-void Neural_net::backward_pass(int a[], double value[], double target[], int batch_size){
-	double delta[LAYERS][max_nodes];
-	double dw[LAYERS][max_nodes][max_nodes];
-	double diff = 0.0;
-
-	for (int l = 0; l < LAYERS; l++) {
-		for (int n = 0; n < layer[l].num_nodes; n++) {
-			for (int w = 0; w < layer[l].node[n].num_inputs; w++) {
-				dw[l][n][w] = 0.0;
+	for (int i = 0; i < CELLS; i++) {
+		if (lpos[i] == 0) {
+			if (net->layer[OUTPUT_LAYER].node[i].value < min) {
+				min = net->layer[OUTPUT_LAYER].node[i].value;
+				min_action = i;
 			}
 		}
 	}
-
-	// Compute error gradients of the minibatch
-	for (int batch = 0; batch < batch_size; batch++) {
-
-		for (int l = 0; l < LAYERS; l++) {
-			for (int n = 0; n < layer[l].num_nodes; n++) {
-				delta[l][n] = 0.0;
-		}	}
-
-		delta[OUTPUT_LAYER][a[batch]] = -(target[batch] - value[batch]);
-        delta[OUTPUT_LAYER][a[batch]] = clip( delta[OUTPUT_LAYER][a[batch]], -1.0, 1.0);
-		// Back-propagate
-		for (int l = OUTPUT_LAYER - 1; l > 0; l--) {
-			for (int n = 0; n < layer[l].num_nodes; n++) {
-				for (int m = 0; m < layer[l+1].num_nodes; m++) {
-					delta[l][n] += layer[l+1].node[m].input[n].weight  * delta[l+1][m];
-				}
-				delta[l][n] *= ReLUprime( layer[l].node[n].value );
-			}
-		}
-
-		for (int l = 1; l < LAYERS; l++) {
-			for (int n = 0; n < layer[l].num_nodes; n++) {
-				for (int w = 0; w < layer[l].node[n].num_inputs; w++) {
-					dw[l][n][w] += layer[l-1].node[w].output * delta[l][n]  * ((double) 1/MINIBATCH_SIZE);				
-				}
-			}
-		}
-	}
-	for (int l = 1; l < LAYERS; l++) {
-		for (int n = 0; n < layer[l].num_nodes; n++) {
-			for (int w = 0; w < layer[l].node[n].num_inputs; w++) {
-				//dw[l][n][w] = clip(dw[l][n][w], -1.0, 1.0);
-
-				//s[l][n][w] = ALPHA * s[l][n][w] - RMS_PROP_MOMENTUM * dw[l][n][w];
-				//layer[l].node[n].input[w].weight += s[l][n][w];
-
-				//s[l][n][w] = RMS_PROP_MOMENTUM * s[l][n][w] + ONE_MINUS_RMS_PROP_MOMENTUM*dw[l][n][w]*dw[l][n][w];
-				//layer[l].node[n].input[w].weight -= ALPHA * (1/(sqrt(s[l][n][w]+0.01))) * dw[l][n][w];
-
-				layer[l].node[n].input[w].weight -= ALPHA * dw[l][n][w];
-			}
-		}
-	}
+	return min_action;
 }
 
-double ReLU(double input) {
-	if (input < 0) return LEAK * input;
-	else return input;
-}
-
-double ReLUprime(double input) {
-	if (input < 0) return LEAK;
-	else return 1;
-}
-
-double clip (double num, double low, double high) {
-	num = max(low, num);
-	num = min(high, num);
-	return num;
+void DQN_trainer::store_weights(ofstream& to) {
+	trainer.store_weights(to);
 }
 
 // *********************************************************************************
 // **************** Orbit class ****************************************************
-// *********************************************************************************
 
 Orbit::Orbit (Node* initial_node, Game_tree* tr) {
 	tree = tr;
@@ -1098,7 +1210,7 @@ Orbit::Orbit (Node* initial_node, Game_tree* tr) {
 					mid = (first + last) / 2;
 				}
 			}
-			if (new_hash) orbit_hashes.insert(orbit_hashes.begin() + first, hash)
+			if (new_hash) orbit_hashes.insert(orbit_hashes.begin() + first, hash);
 		}
 	}
 	rep_hash = orbit_hashes[0];
@@ -1110,7 +1222,6 @@ Orbit::Orbit (int initial_node_hash, Game_tree* tr) : Orbit(tr->table[initial_no
 
 // *********************************************************************************
 // **************** Game tree ******************************************************
-// *********************************************************************************
 
 Game_tree::Game_tree () {
 	hash (&root_node, 0);
@@ -1210,7 +1321,6 @@ Node* Game_tree::reflect_node (Node* initial_node, int n) {
 
 // *********************************************************************************
 // *************** Tree crawler ****************************************************
-// *********************************************************************************
 
 Tree_crawler::Tree_crawler (Game_tree* tr) {
 	tree = tr;
@@ -1300,7 +1410,6 @@ void Tree_crawler::compute_utilities() {
 
 // *********************************************************************************
 // ************** Board ************************************************************
-// *********************************************************************************
 
 Board::Board (int n)  {
 	hash = n;
@@ -1431,7 +1540,6 @@ int Board::Line::find_two_of_three (int pl) {
 
 // *********************************************************************************
 // ************ Q trainer **********************************************************
-// *********************************************************************************
 
 Q_trainer::Q_trainer (float a, float g, float e) {
 	ALPHA = initALPHA = a;
@@ -1459,18 +1567,16 @@ void Q_trainer::train_double (int eps) {
 	uniform_real_distribution<> dis(0.0, 1.0);
 	for (int i = 0; i < eps; i++) {
 		cur = &(tree.root_node);
-		//move1 = next_training_move(cur, dis(gen), true);
-		if (dis(gen) < EPSILON) move1 = rand() % (cur->last_child+1);
-		else move1 =  cur->next_move(5);
+		if (dis(gen) < EPSILON) move1 = cur->next_move(RANDOM);
+		else move1 =  cur->next_move(DOUBLEQ);
 		mid = cur->children[move1];
 		cur->refresh_double_Q_data();
 		mid->refresh_double_Q_data();
 		while (!cur->board.is_terminal()) {
 			coin = rand() % 2;
 			if (!mid->board.is_terminal()) {
-				//move2 = next_training_move(mid, dis(gen), true);
-				if (dis(gen) < EPSILON) move2 = rand() % (mid->last_child+1);
-				else move2 =  mid->next_move(5);
+				if (dis(gen) < EPSILON) move2 = move2 = mid->next_move(RANDOM);
+				else move2 = mid->next_move(DOUBLEQ);
 				next = mid->children[move2];
 				next->refresh_double_Q_data();
 				switch (cur->board.get_turn()) {
@@ -1526,28 +1632,25 @@ void Q_trainer::train_double (int eps) {
 void Q_trainer::train (int eps) {
 	Node *cur, *mid, *next;
 	int move1, move2;
-	double cur_alpha;
 	random_device rd;
 	mt19937 gen(rd());
 	uniform_real_distribution<> dis(0.0, 1.0);
 	for (int i = 0; i < eps; i++) {
 		cur = &(tree.root_node);
-		//move1 = next_training_move(cur, dis(gen), false);
-		if (dis(gen) < EPSILON) move1 = rand() % (cur->last_child+1);
-		else move1 =  cur->next_move(3);
+		if (dis(gen) < EPSILON) move1 = cur->next_move(RANDOM);
+		else move1 =  cur->next_move(QTAB);
 		mid = cur->children[move1];
 		while (!cur->board.is_terminal()) {
 			if (!mid->board.is_terminal()) {
-				//move2 = next_training_move(mid, dis(gen), false);
-				if (dis(gen) < EPSILON) move2 = rand() % (mid->last_child+1);
-				else move2 = mid->next_move(3);
+				if (dis(gen) < EPSILON) move2 = mid->next_move(RANDOM);
+				else move2 = mid->next_move(QTAB);
 				next = mid->children[move2];
 				next->refresh_Q_data();
 				switch (cur->board.get_turn()) {
 
-	case 1  : cur->Q.X[move1] += cur_alpha*(next->board.get_reward() + GAMMA*(next->best_Q) - cur->Q.X[move1]);
+	case 1  : cur->Q.X[move1] += ALPHA*(next->board.get_reward() + GAMMA*(next->best_Q) - cur->Q.X[move1]);
 						break;
-	case -1 : cur->Q.O[move1] += cur_alpha*(next->board.get_reward() + GAMMA*(next->best_Q) - cur->Q.O[move1]);
+	case -1 : cur->Q.O[move1] += ALPHA*(next->board.get_reward() + GAMMA*(next->best_Q) - cur->Q.O[move1]);
 						break;
 
 				}
@@ -1555,9 +1658,9 @@ void Q_trainer::train (int eps) {
 			else {
 				switch (cur->board.get_turn()) {
 
-	case 1  : cur->Q.X[move1] += cur_alpha*(mid->board.get_reward() - cur->Q.X[move1]);
+	case 1  : cur->Q.X[move1] += ALPHA*(mid->board.get_reward() - cur->Q.X[move1]);
 						break;
-	case -1 : cur->Q.O[move1] += cur_alpha*(mid->board.get_reward() - cur->Q.O[move1]);
+	case -1 : cur->Q.O[move1] += ALPHA*(mid->board.get_reward() - cur->Q.O[move1]);
 						break;
 
 				}
@@ -1568,19 +1671,7 @@ void Q_trainer::train (int eps) {
 		}
 		cur_ep++;
 		if ( (cur_ep <= EXPLOREBDRY) and ((cur_ep % EXPLOREBDRYSTEP) == 0) ) EPSILON = max(0.1, (EPSILON-0.1));
-		//if ( (cur_ep % (EPOCHS/100)) == 0 ) ALPHA *= 0.9;
-	}
-}
-
-int Q_trainer::next_training_move (Node* cur, float random, bool d) {
-	int strat = (rand() % 3) + 1;
-	if (strat == 3 and d) strat = 5;
-
-	switch (cur->board.get_turn()) {
-		case 1   :	if ( random < EPSILON ) return ( ((int) floor(10*random)) % ((cur->last_child) + 1) );
-				else return (cur->next_move(strat));
-		case -1  :	return (cur->next_move(strat));
-		default  : 	return -1;
+		if ( (cur_ep % (EPOCHS/100)) == 0 ) ALPHA *= 0.9;
 	}
 }
 
@@ -1643,14 +1734,14 @@ Q_values operator+(Q_values Q1, Q_values Q2) {
 	return Q_sum;
 }
 
-wlt Q_trainer::battle (int plstrat, int compstrat) {
+wlt Q_trainer::battle (strategy plstrat, strategy compstrat) {
 	wlt ledger;
 	Node* battle = &(tree.root_node);
 	for (int i = 0; i < NUMBATTLES; i++) {
 		battle = &(tree.root_node);
-		//battle = battle->next_move_node(2);            // Randomize initial move
+		//battle = battle->next_move_node(RANDOM);            // Randomize initial move
 		//battle = battle->next_move_node(compstrat);
-		while (!battle->board.is_terminal() ) {
+		while ( !battle->board.is_terminal() ) {
 			battle = battle->next_move_node(plstrat);
 			if (battle->board.is_terminal()) {
 				ledger.end_depths[battle->board.get_depth()]++;
@@ -1678,7 +1769,7 @@ wlt Q_trainer::battle (int plstrat, int compstrat) {
 	return ledger;
 }
 
-float_wlt Q_trainer::battle (int plstrat, int compstrat, int numit) {
+float_wlt Q_trainer::battle (strategy plstrat, strategy compstrat, int numit) {
 	wlt total_ledger, cur_game_ledger;
 
 	for (int i = 0; i < numit; i++) {
@@ -1813,8 +1904,10 @@ string Q_trainer::get_plot_data_avg_w_stdev (int epochs, int epochstep, int numi
 	int points = epochs / epochstep + 1;
 	float w[points], l[points], t[points];
 	float wdev[points], ldev[points], tdev[points];
-	string wAverage = "", lAverage = "", tAverage = "";
-	string wAveragePlusDev = "", wAverageMinusDev = "";
+	string wAverage = "", lAverage = "", tAverage = "",
+	       wAveragePlusDev = "", wAverageMinusDev = "",
+	       lAveragePlusDev = "", lAverageMinusDev = "",
+	       tAveragePlusDev = "", tAverageMinusDev = "";
 	float_wlt data;
 
 	for (int i = 0; i < points; i++) {
@@ -1825,9 +1918,6 @@ string Q_trainer::get_plot_data_avg_w_stdev (int epochs, int epochstep, int numi
 		else reset_Q();
 		reset_hypers();
 
-		cout << "**********************************************************" << endl;
-		cout << "**********************************************************" << endl;
-		cout << "**********************************************************" << endl;
 		cout << "EPOCH:" << it << endl;
 
 		for (int ep = 0; ep < points; ep++ ) {
@@ -1837,34 +1927,51 @@ string Q_trainer::get_plot_data_avg_w_stdev (int epochs, int epochstep, int numi
 			data = battle(COMPSTRAT, COMPOPP, 1);
 			if (wrec) { w[ep] += data.w;
 				    wdev[ep] += data.w * data.w; }
-			if (lrec) l[ep] += data.l;
-			if (trec) t[ep] += data.t;
+			if (lrec) { l[ep] += data.l;
+                                    ldev[ep] += data.l * data.l; }
+			if (trec) { t[ep] += data.t;
+                                    tdev[ep] += data.t * data.t; }
 		}
 	}
 	for (int i = 0; i < points; i++) {
 		if (wrec) {	w[i] = w[i] / numit;
 				wdev[i] = sqrt( ( wdev[i] / numit ) - w[i]*w[i] ); } 	// Use sum of squares to compute variance
 		if (lrec) {	l[i] = l[i] / numit;
-				lAverage += (to_string(i*epochstep) + " " + to_string(l[i]) + ","); }
+                                ldev[i] = sqrt( ( ldev[i] / numit ) - l[i]*l[i] ); }
 		if (trec) {	t[i] = t[i] / numit;
-				tAverage += (to_string(i*epochstep) + " " + to_string(t[i]) + ","); }
+                                tdev[i] = sqrt( ( tdev[i] / numit ) - t[i]*t[i] ); }
 	}
-	for (int i = 0; i < points; i++) {
-		wAveragePlusDev += (to_string(i*epochstep) + " " + to_string(w[i] + wdev[i]) + ",");
-		wAverage += (to_string(i*epochstep) + " " + to_string(w[i]) + ",");
-		wAverageMinusDev += (to_string(i*epochstep) + " " + to_string(w[i] - wdev[i]) + ",");
+        if (wrec) {
+   		for (int i = 0; i < points; i++) {
+			wAveragePlusDev += (to_string(i*epochstep) + " " + to_string(w[i] + wdev[i]) + ",");
+			wAverage += (to_string(i*epochstep) + " " + to_string(w[i]) + ",");
+			wAverageMinusDev += (to_string(i*epochstep) + " " + to_string(w[i] - wdev[i]) + ",");
+		}
+	}
+	if (lrec) {
+   		for (int i = 0; i < points; i++) {
+			lAveragePlusDev += (to_string(i*epochstep) + " " + to_string(l[i] + ldev[i]) + ",");
+			lAverage += (to_string(i*epochstep) + " " + to_string(l[i]) + ",");
+			lAverageMinusDev += (to_string(i*epochstep) + " " + to_string(l[i] - ldev[i]) + ",");
+		}
+	}
+	if (trec) {
+   		for (int i = 0; i < points; i++) {
+			tAveragePlusDev += (to_string(i*epochstep) + " " + to_string(t[i] + tdev[i]) + ",");
+			tAverage += (to_string(i*epochstep) + " " + to_string(t[i]) + ",");
+			tAverageMinusDev += (to_string(i*epochstep) + " " + to_string(t[i] - tdev[i]) + ",");
+		}
 	}
 	string output_string = "";
 		if (wrec) output_string += (wAveragePlusDev + ";" + wAverage + ";" + wAverageMinusDev + ";");
-		if (lrec) output_string += (lAverage + ";");
-		if (trec) output_string += (tAverage + ";");
+		if (lrec) output_string += (lAveragePlusDev + ";" + lAverage + ";" + lAverageMinusDev + ";");
+		if (trec) output_string += (tAveragePlusDev + ";" + tAverage + ";" + tAverageMinusDev + ";");
 	return output_string;
 }
 
 
 // *********************************************************************************
 // ************ Node ***************************************************************
-// *********************************************************************************
 
 void Node::add_child ( Node* child ) {
 	last_child++;
@@ -1914,6 +2021,21 @@ int Node::find_child_by_cell (int cell) {
 	}
 	return -1;
 }
+
+// Optibot information
+const int CORNER[4] = {0, 2, 6, 8};					// Corner cells
+const int OPPOSITECORNER[4] = {8, 6, 2, 0};				// Opposite corners from corner cells
+const int SIDE[4] = {1, 3, 5, 7};					// Side cells
+const int CENTER = 4; 							// The center
+const vector<int> LINESTHROUGHCELL[9] =       { {0, 3, 6}, 		//
+						{1, 3}, 		// Ids of lines passing through each
+						{2, 3, 7}, 		// of the board cells
+						{0, 4},			//
+						{1, 4, 6, 7},
+						{2, 4},
+						{0, 5, 7},
+						{1, 5},
+						{2, 5, 6} };
 
 int Node::find_opti_move() {
 	// Follows strategy of CROWLEY and SIEGLER  (slightly modified)
@@ -2017,8 +2139,7 @@ int Node::find_opti_move() {
 							if (!win_next_turn) {
 							forced_move = false;
 							for (int a = 0; a < LINESTHROUGHCELL[n].size(); a++) {
-								temp_line = future_node->board.line[ LINESTHROUGHCELL[n][a] ];							
-
+								temp_line = future_node->board.line[ LINESTHROUGHCELL[n][a] ];
 								if (temp_line.check_two_of_three (-future_node->board.get_turn()) ) {
 									lc = temp_line.find_two_of_three (-future_node->board.get_turn() );
 									n = line_cell_to_board_cell (LINESTHROUGHCELL[n][a], lc);
@@ -2251,26 +2372,19 @@ void Q_values::reset(bool r) {
 	}
 }
 
-int Node::next_move(int strat) {
+int Node::next_move(strategy strat) {
 	switch (strat) {
-		case 1   : 	// Minimax
-			 	return minimax_move;
-		default  : 	// Random
-				return rand() % (last_child + 1);
-		case 3   : 	{// Q-learned (tabular)
-				refresh_Q_data();
-				return TQ_move; }
-		case 4   :	// Optibot
-				return opti_move;
-		case 5   : 	{// Double Q-learned (tabular)
-				refresh_double_Q_data();
-				return double_TQ_move; }
-		case 6   :      // DQN
-				return DQ_move;
+		case MINIMAX   : return minimax_move;
+		case RANDOM    : return rand() % (last_child + 1);
+		case HEURIBOT  : return opti_move;
+		case QTAB      : {refresh_Q_data(); return TQ_move;}
+		case DOUBLEQ   : {refresh_double_Q_data(); return double_TQ_move;}
+		case DQN       : return DQ_move;
+		default        : {cout << "ERROR: Strategy not recognized in next_move" << endl; return -1;} // Error
 	}
 }
 
-Node* Node::next_move_node (int strat) {
+Node* Node::next_move_node (strategy strat) {
 	return children[next_move(strat)];
 }
 
@@ -2369,9 +2483,8 @@ int lpos_to_hash (int lpos[]) {
 
 // *********************************************************************************
 // ************ Exporter ***********************************************************
-// *********************************************************************************
 
-void Exporter::output_html_strategy_table (char file_name[]) {
+void Exporter::output_html_strategy_table (char file_name[], bool breadth) {
 	Node* node;
 	Board board;
 	string turn;
@@ -2383,7 +2496,7 @@ void Exporter::output_html_strategy_table (char file_name[]) {
 	ofstream to (file_name);
 
 	Q.train_double(EPOCHS);
-	crawler.find_orbits_breadthfirst();
+        breadth ? crawler.find_orbits_breadthfirst() : crawler.find_orbits();
 	crawler.compute_opti_moves();
 
 
@@ -2472,7 +2585,7 @@ void Exporter::output_html_strategy_table (char file_name[]) {
 			to << "<td>" + opti_class + "<br> (Moves: " + opti_moves + ") </td>" << endl;
 			// Minimax move
 				// Fill in utilities of open moves
-			for (int i = 0; i < CELLS; i++) 
+			for (int i = 0; i < CELLS; i++)
 				board.lpos[i] = INFTY;
 			for (int i = 0; i <= node->last_child; i++)
 				board.lpos[ node->children_cells[i] ] = node->children[i]->utility;
@@ -2514,7 +2627,6 @@ void Exporter::output_html_strategy_table (char file_name[]) {
 			to << "</tr>" << endl;
 			to << "<tr style=\"border: 0px\"> <td style=\"border : 0px\"> &nbsp </td> </tr>" << endl;
 		}
-
 
 		else 	{	// Position is terminal
 			terminal_positions << "<tr>" << endl;
@@ -2709,48 +2821,36 @@ void Exporter::print_board_to_string(Board board, ostringstream& tp, bool small)
 		tp << "</table>" << endl;
 }
 
-/*
-void fillStrat(Board_position* board_pointer, int strat[]) {
-	Board_position temp = *board_pointer;
-	if (!temp.is_terminal() ) {
-		strat[temp.index] = (temp.valid_moves.return_node(temp.minimax_move)).cell;
-		for (int i = 0; i < temp.valid_moves.list_len; i++) {
-			fillStrat(temp.valid_moves.read_node(i), strat);
-		}
-	}
-}*/
+void fill_strat(Game_tree& tree, int* strat_array, strategy STRAT) {
+    Node *cur_node, *child_node;
+    queue<Node*> node_queue;
+    node_queue.push(&tree.root_node);
+    int move;
+    bool marked_to_visit[BOARDS];
+    for (int i = 0; i < BOARDS; i++) marked_to_visit[i] = false;
 
-void fillQStrat(Node* node, vector<int>* strat_pointer, ofstream& to3) {
-	int m;
-	if (!node->board.is_terminal() ) {
-		node->refresh_double_Q_data();
-		int m = node->double_TQ_move;
-		//int m = node->opti_move;
-		to3 << "-------" << endl;
-		to3 << "Board: " << node->hash << "." << endl;
-		to3 << "Minimax :" << node->minimax_move << endl;
-		to3 << node->children_cells[node->minimax_move] << endl;
-		to3 << node->board.lpos[0] << " | " << node->board.lpos[1] << " | " << node->board.lpos[2] << endl;
-		to3 << node->board.lpos[3] << " | " << node->board.lpos[4] << " | " << node->board.lpos[5] << endl;
-		to3 << node->board.lpos[6] << " | " << node->board.lpos[7] << " | " << node->board.lpos[8] << endl;
-		to3 << "Turn: " << node->board.get_turn() << endl;
-		//node->find_opti_move();
-		to3 << "Optimove: " << node->opti_move << endl;
-		to3 << "Optimove cell: " << node->children_cells[node->opti_move] << endl;
-		for (int i = 0; i <= node->last_child; i++) {
-			switch (node->board.get_turn()) {
-				case 1  : 	to3 << node->Q.X[i] << " ";
-						break;
-				case -1 :       to3 << node->Q.O[i] << " ";
-						break;
-			}
-		}
-		to3 << endl;
-		to3 << "Move: " << node->children_cells[m] << endl;
-		to3 << "-------" << endl;
-		(*strat_pointer)[node->hash] = node->children_cells[m];
-		for (int i = 0; i <= node->last_child; i++) {
-			fillQStrat(node->children[i], strat_pointer, to3);
-		}
-	}
+    while (node_queue.size() > 0) {
+        cur_node = node_queue.front();
+        node_queue.pop();
+        switch(STRAT) {
+            case MINIMAX    :    move = cur_node->minimax_move;
+                                 break;
+            case HEURIBOT   :    move = cur_node->opti_move;
+                                 break;
+            case DOUBLEQ    :    move = cur_node->double_TQ_move;
+                                 break;
+            case DQN        :    move = cur_node->DQ_move;
+                                 break;
+            default         :    move = rand() % (cur_node->last_child + 1);
+                                 break;
+        }
+        strat_array[cur_node->hash] = cur_node->children_cells[move];
+
+        for (int i = 0; i <= cur_node->last_child; i++) {
+            child_node = cur_node->children[i];
+            if (!child_node->board.is_terminal() && !marked_to_visit[child_node->hash])
+                node_queue.push(child_node);
+                marked_to_visit[child_node->hash] = true;
+        }
+    }
 }
