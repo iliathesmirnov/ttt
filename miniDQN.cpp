@@ -557,56 +557,6 @@ int main(int argc, char* argv[]) {
         wr.close();
 
 /*
-	ofstream to(argv[1]);
-	Q_trainer Q;
-	wlt xledger, oledger;
-	const short sampling_rate = 100;
-	float xmean[DQN_EPOCHS/sampling_rate], omean[DQN_EPOCHS/sampling_rate];
-	float xdev[DQN_EPOCHS/sampling_rate], odev[DQN_EPOCHS/sampling_rate];
-
-	for (int i = 0; i < DQN_EPOCHS/sampling_rate; i++) {
-		xmean[i] = 0.0;  omean[i] = 0.0;
-		xdev[i] = 0.0;  odev[i] = 0.0;
-	}
-
-	for (int j = 0; j < 10; j++) {
-		DQN_trainer_with_two_nets tr(&Q.tree);
-	for (int i = 0; i < DQN_EPOCHS/sampling_rate; i++) {
-		cout << i << endl;
-		tr.train(sampling_rate);
-		tr.store_DQ_actions(&Q.tree);
-		xledger = Q.battle(DQN, RANDOM);
-		std::cout << "W: " << xledger.w << "  L: " << xledger.l << "  T: " << xledger.t << std::endl;
-		oledger = Q.battle(RANDOM, DQN);
-		std::cout << "W: " << oledger.w << "  L: " << oledger.l << "  T: " << oledger.t << std::endl;
-		xmean[i] += xledger.w/100000;
-		omean[i] += oledger.w/100000;
-		xdev[i] += (xledger.w/100000) * (xledger.w/100000);
-		odev[i] += (oledger.w/100000) * (oledger.w/100000);
-	}
-	}
-
-        std::string x_rec_plus = "", x_rec = "", x_rec_minus = "",
-                    o_rec_plus = "", o_rec = "", o_rec_minus = "";
-
-	for (int i = 0; i < DQN_EPOCHS/sampling_rate; i++) {
-		xmean[i] /= 10;
-		omean[i] /= 10;
-		xdev[i] = (xdev[i] - 10*xmean[i]*xmean[i])/9;
-		odev[i] = (odev[i] - 10*omean[i]*omean[i])/9;
-		x_rec_plus += to_string(i * sampling_rate) + " " + to_string(xmean[i] + xdev[i]) + ",";
-		x_rec += to_string(i * sampling_rate) + " " + to_string(xmean[i]) + ",";
-		x_rec_minus += to_string(i * sampling_rate) + " " + to_string(xmean[i] - xdev[i]) + ",";
-		o_rec_plus += to_string(i * sampling_rate) + " " + to_string(omean[i] + odev[i]) + ",";
-		o_rec += to_string(i * sampling_rate) + " " + to_string(omean[i]) + ",";
-		o_rec_minus += to_string(i * sampling_rate) + " " + to_string(omean[i] - odev[i]) + ",";
-	}
-
-	to << x_rec_plus << ";" << x_rec << ";" << x_rec_minus << ";"
-           << o_rec_plus << ";" << o_rec << ";" << o_rec_minus << ";" << "!";
-*/
-
-/*
 //======= Battling every pair of agents ===================================
 	Q_trainer Q(1, 0.999, 1);
 	DQN_trainer_with_two_nets tr(&Q.tree);
