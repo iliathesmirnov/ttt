@@ -40,17 +40,18 @@ const int STEP = 1;
 const bool QRAND = false;			// Randomize initial Q-values?
 bool DEPTHVERBOSE = true;	  		// Include outputs regarding game depth?
 
-const int DQN_EPOCHS = 6000000;
-double DQN_ALPHA = 25e-5;
-const int DQN_ALPHA_UPDATE_FREQ = 2000000;
+const int DQN_EPOCHS = 500000;
+double DQN_ALPHA = 1e-4;
+const int DQN_ALPHA_UPDATE_FREQ = 400000;
+const double DQN_ALPHA_SCALE = 0.1;
 const double DQN_GAMMA = 0.9;
 const double DQN_EPSILON = 0.1;
 const double LEAK = 0.01;
 const int BUFFER_CAPACITY = 300000;
-const int TARGET_UPDATE_FREQUENCY = 30000;
-const int MINIBATCH_SIZE = 32;
+const int TARGET_UPDATE_FREQUENCY = 25000;
+const int MINIBATCH_SIZE = 2;
 const int LAYERS = 4;
-int NODES_IN_LAYER[LAYERS] = {CELLS, 64, 64, CELLS+1};
+int NODES_IN_LAYER[LAYERS] = {CELLS, 32, 32, CELLS+1};
 const int DQN_K = 1;
 
 const int INPUT_LAYER = 0;
@@ -98,6 +99,8 @@ int board_cell_to_line_cell (int cell, int line);
 // Passing between boards and hashes
 int turn_to_ternary (int turn);
 int lpos_to_hash(int lpos[]);
+
+string strat2name (strategy strat);
 
 enum optibot_strategy { WIN,
 		        BLOCK_WIN,
@@ -205,6 +208,7 @@ public:
 	int find_opti_move();
 	void compute_opti_move();
 	int DQ_move;
+	double DQ_values[CELLS];
 	int next_move (strategy strat);
 	Node* next_move_node (strategy strat);
 	Node();
@@ -289,8 +293,8 @@ public:
 	void reset_Q();
 	void reset_double_Q();
 	void reset_hypers();
-	wlt battle(strategy plstrat, strategy oppstrat);
-	float_wlt battle(strategy plstrat, strategy oppstrat, int numit);
+	wlt battle(strategy plstrat, strategy oppstrat, bool initrand = false);
+	float_wlt battle(strategy plstrat, strategy oppstrat, int numit, bool initrand = false);
 	string get_plot_data (int ep, int epstep, int numit, bool d = false, bool wrec = true, bool lrec = true, bool trec = true);
 	string get_plot_data_avg_w_stdev (int ep, int epstep, int numit, bool d = false, bool wrec = true, bool lrec = true, bool trec = true);
 	vector<string> get_plot_data_w_stdev (int ep, int epstep, int numit, bool d = false, bool wrec = true, bool lrec = true, bool trec = true);
@@ -334,6 +338,7 @@ private:
 	void print_board_to_string (Board board, ostringstream& tp, bool small = false);
 	void print_minimax_board_to_html (Board board, ofstream& to, bool small = true);
 	void print_Q_board_to_html (double lpos[], int turn, ofstream& to, bool small = true);
+	void print_DQN_board_to_html (double DQ_values[], int turn, ofstream& to, double DQ_low, double DQ_range, bool small);
 public:
 	void output_html_strategy_table (char file_name[], bool breadth);
 };
@@ -373,6 +378,7 @@ struct FF_layer {
 
 class Neural_net {
 friend class DQN_trainer;
+friend class DQN_trainer_with_two_nets;
 private:
 	static const int INPUT_LAYER_INDEX = 0;
 	static const int OUTPUT_LAYER_INDEX = LAYERS - 1;
@@ -397,9 +403,25 @@ public:
 
 	void fit_minimax(Game_tree* tree);
 	void store_weights(ofstream& to);
+	void load_weights(string& weight_str);
 	void display();
 
 	Neural_net();
+};
+
+struct Transition {
+	Node* cur;
+	Node* next;
+	int a, r;
+	Transition (Node* cur, Node* next, int a, int r);
+};
+
+struct Buffer {
+	deque<Transition> transition;
+	Game_tree* tree;
+	void fill_both_sides(int capacity = BUFFER_CAPACITY);
+	void fill_one_side(int capacity = BUFFER_CAPACITY, bool filling_O = false);
+	Buffer(Game_tree* tree = NULL);
 };
 
 class DQN_trainer {
@@ -409,33 +431,46 @@ private:
 	Game_tree* tree = NULL;
 	int t = 0;
 	double avg_Q[CELLS];
-	struct Transition {
-		Node* cur;
-		Node* next;
-		int a, r;
-
-		Transition (Node* cur, Node* next, int a, int r);
-	};
-	struct Buffer {
-		deque<Transition> transition;
-		Game_tree* tree;
-		void fill(int capacity = BUFFER_CAPACITY);
-		Buffer(Game_tree* tree = NULL);
-	};
 	Buffer replay_buffer;
-	Buffer random_buffer;
 	double GAMMA = DQN_GAMMA;
 	double EPSILON = DQN_EPSILON;
-public:
-	void fill_buffer(int capacity = BUFFER_CAPACITY);
-	void train(int epochs = DQN_EPOCHS);
 	double max_DQ (int valid_cell[], Neural_net* action_net);
 	double min_DQ (int valid_cell[], Neural_net* action_net);
 	int max_DQ_action (int valid_cell[], Neural_net* net);
 	int min_DQ_action (int valid_cell[], Neural_net* net);
-	void store_DQ_actions(Game_tree* tree);
-	void store_weights(ofstream& to);
-	DQN_trainer(Game_tree* tree);
+public:
+	double high_Q, low_Q;
+	void fill_buffer (int capacity = BUFFER_CAPACITY);
+	void train (int epochs = DQN_EPOCHS);
+	void store_DQ_actions (Game_tree* tree);
+	void find_Q_bounds();
+	void store_weights (ofstream& to);
+	void load_weights (ifstream& from);
+	DQN_trainer (Game_tree* tree);
+};
+
+class DQN_trainer_with_two_nets {
+private:
+	Neural_net trainer_x, target_x, trainer_o, target_o;
+	Game_tree* tree = NULL;
+	int t = 0;
+	double avg_Q[CELLS];
+	Buffer replay_x, replay_o;
+	double GAMMA = DQN_GAMMA;
+	double EPSILON = DQN_EPSILON;
+	int min_DQ_action(int valid_move[], Neural_net* net);
+	int max_DQ_action(int valid_move[], Neural_net* net);
+	double min_DQ (int valid_move[], Neural_net* net);
+	double max_DQ (int valid_move[], Neural_net* net);
+public:
+	double high_Q, low_Q;
+	void fill_buffers (int capacity = BUFFER_CAPACITY);
+	void train (int epochs = DQN_EPOCHS);
+	void store_DQ_actions (Game_tree* tree);
+	void find_Q_bounds ();
+	void store_weights (ofstream& to);
+	void load_weights (ifstream& from);
+	DQN_trainer_with_two_nets (Game_tree* tree);
 };
 
 typedef tuple<int,int,int> minimax_point;
@@ -454,50 +489,48 @@ typedef tuple<int,int,int> minimax_point;
 
 int main(int argc, char* argv[]) {
 	cout << fixed << setprecision(3);
-	srand (time(NULL));
+	srand(time(NULL));
 
 //====== DQN Training =====================================================
-	Game_tree tree;
-	Neural_net net;
 	ofstream to (argv[1]);
+	ofstream weight_writer;
 
-	Q_trainer Q, X_best, O_best;
-	wlt x_ledger, o_ledger;
-//	Tree_crawler crawler = Tree_crawler(&(Q.tree));
-//	net.fit_minimax(&tree);
-//	crawler.compute_utilities();
-//	Q.train(EPOCHS);
+	Q_trainer Q, best;
+	wlt xledger, oledger;
+	DQN_trainer_with_two_nets tr(&Q.tree);
+	float bestwinr = -INFTY, curwinr;
+        std::string xrec = "", orec = "";
 
-	DQN_trainer tr(&Q.tree);
-	tr.fill_buffer();
-	float best_wr = -INFTY, cur_wr;
-        std::string x_rec = "", o_rec = "";
-	for (int i = 0; i < DQN_EPOCHS/1000; i++) {
-		cout << i << " 000" << endl;
-		tr.train(1000);
+	const short sampling_rate = 100;
+	for (int i = 0; i < DQN_EPOCHS; i += sampling_rate) {
+		cout << i << endl;
+		tr.train(sampling_rate);
 		tr.store_DQ_actions(&Q.tree);
-		x_ledger = Q.battle(DQN, RANDOM);
-		std::cout << "W: " << x_ledger.w << "  L: " << x_ledger.l << "  T: " << x_ledger.t << std::endl;
-                x_rec += std::to_string(i) + "000 " + std::to_string(x_ledger.w) + ",";
-		o_ledger = Q.battle(RANDOM, DQN);
-		std::cout << "W: " << o_ledger.w << "  L: " << o_ledger.l << "  T: " << o_ledger.t << std::endl;
-                o_rec += std::to_string(i) + "000 " + std::to_string(o_ledger.l) + ",";
-                cur_wr = (x_ledger.w + o_ledger.l) - (x_ledger.l + o_ledger.w);
-                if (cur_wr > best_wr) {
-			best_wr = cur_wr;
-                	tr.store_DQ_actions(&X_best.tree);
+		xledger = Q.battle(DQN, RANDOM);
+		std::cout << "W: " << xledger.w << "  L: " << xledger.l << "  T: " << xledger.t << std::endl;
+                xrec += std::to_string(i) + " " + std::to_string(xledger.w) + ",";
+		oledger = Q.battle(RANDOM, DQN);
+		std::cout << "W: " << oledger.w << "  L: " << oledger.l << "  T: " << oledger.t << std::endl;
+                orec += std::to_string(i) + " " + std::to_string(oledger.l) + ",";
+                curwinr = (xledger.w + oledger.l) - (xledger.l + oledger.w);
+                if (curwinr > bestwinr) {
+			bestwinr = curwinr;
+                	tr.store_DQ_actions(&best.tree);
+			weight_writer = ofstream(argv[3]);
+			tr.store_weights(weight_writer);
+			weight_writer.close();
 		}
 	}
-	to << x_rec << ";" << o_rec << ";!";
+	to << xrec << ";" << orec << ";!";
 
 	std::cout << "DQN v. minimax" << std::endl;
-        X_best.battle(DQN, MINIMAX, 1000);
+        best.battle(DQN, MINIMAX, 1000);
 	std::cout << "minimax v. DQN" << std::endl;
-        X_best.battle(MINIMAX, DQN, 1000);
+        best.battle(MINIMAX, DQN, 1000);
 	std::cout << "DQN v. random" << std::endl;
-        X_best.battle(DQN, RANDOM, 1000);
+        best.battle(DQN, RANDOM, 1000);
 	std::cout << "random v. DQN" << std::endl;
-        X_best.battle(RANDOM, DQN, 1000);
+        best.battle(RANDOM, DQN, 1000);
 
 	to << "Alpha: " << DQN_ALPHA << endl;
 	to << "Gamma: " << DQN_GAMMA << endl;
@@ -512,61 +545,107 @@ int main(int argc, char* argv[]) {
 	}
         to << endl;
         to << "Optimizer: " << OPTI_TYPE;
-
 	to.close();
 
 // ==== Strategy export =============================================================
 	ofstream wr(argv[2]);
 	int strat_table[BOARDS];
-        fill_strat(X_best.tree, strat_table, DQN);
+        fill_strat(best.tree, strat_table, DQN);
         for (int i = 0; i < BOARDS; i++)
             wr << strat_table[i] << " ";
         wr << ".";
         wr.close();
 
-// ==== Weights export =============================================================
-	ofstream strat_writer(argv[3]);
-	tr.store_weights(strat_writer);
-	strat_writer.close();
+/*
+	ofstream to(argv[1]);
+	Q_trainer Q;
+	wlt xledger, oledger;
+	const short sampling_rate = 100;
+	float xmean[DQN_EPOCHS/sampling_rate], omean[DQN_EPOCHS/sampling_rate];
+	float xdev[DQN_EPOCHS/sampling_rate], odev[DQN_EPOCHS/sampling_rate];
 
+	for (int i = 0; i < DQN_EPOCHS/sampling_rate; i++) {
+		xmean[i] = 0.0;  omean[i] = 0.0;
+		xdev[i] = 0.0;  odev[i] = 0.0;
+	}
+
+	for (int j = 0; j < 10; j++) {
+		DQN_trainer_with_two_nets tr(&Q.tree);
+	for (int i = 0; i < DQN_EPOCHS/sampling_rate; i++) {
+		cout << i << endl;
+		tr.train(sampling_rate);
+		tr.store_DQ_actions(&Q.tree);
+		xledger = Q.battle(DQN, RANDOM);
+		std::cout << "W: " << xledger.w << "  L: " << xledger.l << "  T: " << xledger.t << std::endl;
+		oledger = Q.battle(RANDOM, DQN);
+		std::cout << "W: " << oledger.w << "  L: " << oledger.l << "  T: " << oledger.t << std::endl;
+		xmean[i] += xledger.w/100000;
+		omean[i] += oledger.w/100000;
+		xdev[i] += (xledger.w/100000) * (xledger.w/100000);
+		odev[i] += (oledger.w/100000) * (oledger.w/100000);
+	}
+	}
+
+        std::string x_rec_plus = "", x_rec = "", x_rec_minus = "",
+                    o_rec_plus = "", o_rec = "", o_rec_minus = "";
+
+	for (int i = 0; i < DQN_EPOCHS/sampling_rate; i++) {
+		xmean[i] /= 10;
+		omean[i] /= 10;
+		xdev[i] = (xdev[i] - 10*xmean[i]*xmean[i])/9;
+		odev[i] = (odev[i] - 10*omean[i]*omean[i])/9;
+		x_rec_plus += to_string(i * sampling_rate) + " " + to_string(xmean[i] + xdev[i]) + ",";
+		x_rec += to_string(i * sampling_rate) + " " + to_string(xmean[i]) + ",";
+		x_rec_minus += to_string(i * sampling_rate) + " " + to_string(xmean[i] - xdev[i]) + ",";
+		o_rec_plus += to_string(i * sampling_rate) + " " + to_string(omean[i] + odev[i]) + ",";
+		o_rec += to_string(i * sampling_rate) + " " + to_string(omean[i]) + ",";
+		o_rec_minus += to_string(i * sampling_rate) + " " + to_string(omean[i] - odev[i]) + ",";
+	}
+
+	to << x_rec_plus << ";" << x_rec << ";" << x_rec_minus << ";"
+           << o_rec_plus << ";" << o_rec << ";" << o_rec_minus << ";" << "!";
+*/
 
 /*
 //======= Battling every pair of agents ===================================
 	Q_trainer Q(1, 0.999, 1);
-	Q.tree.compute_utilities();
+	DQN_trainer_with_two_nets tr(&Q.tree);
+	std::ifstream from("weights1280.txt");
+	tr.load_weights(from);
 	Tree_crawler crawler = Tree_crawler(&Q.tree);
-	crawler.compute_opti_moves();
-        Q.train_double(3000000);
-	std::cout << "Random v. Qtab" << std::endl;
-	Q.battle(RANDOM, DOUBLEQ, 1000);
-	std::cout << "Qtab v. Random" << std::endl;
-	Q.battle(DOUBLEQ, RANDOM, 1000);
-	std::cout << "Minimax v. Qtab" << std::endl;
-	Q.battle(MINIMAX, DOUBLEQ, 1000);
-	std::cout << "Qtab v. Minimax" << std::endl;
-	Q.battle(DOUBLEQ, MINIMAX, 1000);
-	std::cout << "Heuribot v. Qtab" << std::endl;
-	Q.battle(HEURIBOT, DOUBLEQ, 1000);
-	std::cout << "Qtab v. Heuribot" << std::endl;
-	Q.battle(DOUBLEQ, HEURIBOT, 1000);
-	std::cout << "Minimax v. Random" << std::endl;
-	Q.battle(MINIMAX, RANDOM, 1000);
-	std::cout << "Random v. Minimax" << std::endl;
-	Q.battle(RANDOM, MINIMAX, 1000);
-	std::cout << "Minimax v. Heuribot" << std::endl;
-	Q.battle(MINIMAX, HEURIBOT, 1000);
-	std::cout << "Heuribot v. Minimax" << std::endl;
-	Q.battle(HEURIBOT, MINIMAX, 1000);
-	std::cout << "Heuribot v. Random" << std::endl;
-	Q.battle(HEURIBOT, RANDOM, 1000);
-	std::cout << "Random v. Heuribot" << std::endl;
-	Q.battle(RANDOM, HEURIBOT, 1000);
-*/
 
+						// ...Load (or train)...
+	Q.tree.compute_utilities();		// Minimax strategy
+	tr.store_DQ_actions(&Q.tree);		// DQN strategy
+	crawler.compute_opti_moves();		// Heuribot strategy
+	Q.train(5000000);			// Single Q-learning (tabular) strategy
+        Q.train_double(5000000);		// Double Q-learning (tabular) strategy
+
+	const int num_agents = 6;
+	strategy pl_strat, opp_strat;
+	for (int pl = 0; pl < num_agents; pl++) {
+		for (int opp = 0; opp < num_agents; opp++) {
+			pl_strat = static_cast<strategy>(pl);
+			opp_strat = static_cast<strategy>(opp);
+			std::cout << strat2name(pl_strat) << "  v.  " << strat2name(opp_strat) << "\t";
+			Q.battle(pl_strat, opp_strat, 1000);
+                        std::cout << std::endl;
+		}
+	}
+	for (int pl = 0; pl < num_agents; pl++) {
+		for (int opp = 0; opp < num_agents; opp++) {
+			pl_strat = static_cast<strategy>(pl);
+			opp_strat = static_cast<strategy>(opp);
+			std::cout << strat2name(pl_strat) << "  v.  " << strat2name(opp_strat) << "\t";
+			Q.battle(pl_strat, opp_strat, 1000, true);
+                        std::cout << std::endl;
+		}
+	}
+*/
 /*
 // ===== Generate strategy tables ===================================================
 	Exporter exp;
-	exp.output_html_strategy_table(argv[1], true);
+	exp.output_html_strategy_table(argv[1], false);
 */
 
 /*
@@ -811,7 +890,39 @@ void Neural_net::store_weights(ofstream& to) {
 			}
 		}
 	}
-	to << "!";
+	to << ";";
+}
+
+void Neural_net::load_weights(string& input) {
+	string weight_string = "";
+	int num_weights = 0;
+	for (int l = 1; l < LAYERS; l++)
+		num_weights += NODES_IN_LAYER[l-1] * NODES_IN_LAYER[l];
+	vector<float> weights(num_weights);
+	vector<float>::iterator wit = weights.begin();
+	int i = 0;
+	char ch;
+	while ((ch = input[i]) != ';') {
+		switch(ch) {
+			case ' '    :    *wit = stof(weight_string);
+					 wit++;
+					 weight_string = "";
+					 break;
+			default     :    weight_string += ch;
+					 break;
+		}
+		i++;
+	}
+
+	int weight_counter = 0;
+	for (int l = 1; l < LAYERS; l++) {
+		for (int n = 0; n < NODES_IN_LAYER[l]; n++) {
+			for (int m = 0; m < NODES_IN_LAYER[l-1]; m++) {
+				layer[l].node[n].input[m].weight = weights[weight_counter];
+				weight_counter++;
+			}
+		}
+	}
 }
 
 void Neural_net::fit_minimax(Game_tree* tree) {
@@ -922,6 +1033,67 @@ void Neural_net::fit_minimax(Game_tree* tree) {
 // ==============================================================================
 // ========================== DQN Trainer =======================================
 
+Transition::Transition (Node* cur, Node* next, int a, int r) {
+	this->cur = cur;
+	this->next = next;
+	this->a = a;
+	this->r = r;
+}
+
+Buffer::Buffer (Game_tree* tree) {
+	this->tree = tree;
+}
+
+void Buffer::fill_both_sides (int capacity) {
+	int n = 0, a, b, r;
+	Node *cur = &(tree->root_node), *mid, *next;
+	Transition trans = Transition(cur, cur, 0, 0);
+
+	while (n < capacity) {
+		cur = &(tree->root_node);
+		a = rand() % (cur->last_child + 1);
+		mid = cur->children[a];
+		while (!cur->board.is_terminal()) {
+			if (!mid->board.is_terminal()) {
+				b = rand() % (mid->last_child + 1);
+				next = mid->children[b];
+			}
+			else next = mid;
+
+			trans = Transition(cur, next, a, next->board.get_reward());
+			transition.push_back(trans);
+			cur = mid;  mid = next;  a = b;
+			n++;
+		}
+	}
+}
+
+void Buffer::fill_one_side (int capacity, bool filling_O) {
+	int n = 0, a, b, r;
+	Node *cur = &(tree->root_node), *mid, *next;
+	Transition trans(cur, cur, 0, 0);
+
+	while (n < capacity) {
+		cur = &(tree->root_node);
+		if (filling_O) cur = cur->children[rand() % CELLS];
+		while (!cur->board.is_terminal()) {
+			a = rand() % (cur->last_child + 1);
+			mid = cur->children[a];
+
+			if (!mid->board.is_terminal()) {
+				b = rand() % (mid->last_child + 1);
+				next = mid->children[b];
+			}
+			else next = mid;
+
+			trans = Transition(cur, next, a, next->board.get_reward());
+			transition.push_back(trans);
+			cur = next;
+			n++;
+		}
+	}
+}
+
 void DQN_trainer::store_DQ_actions (Game_tree* tree) {
 	Tree_crawler crawler = Tree_crawler(tree);
 	crawler.reset_visits();
@@ -952,89 +1124,19 @@ void DQN_trainer::store_DQ_actions (Game_tree* tree) {
 	}
 }
 
-DQN_trainer::Transition::Transition (Node* cur, Node* next, int a, int r) {
-	this->cur = cur;
-	this->next = next;
-	this->a = a;
-	this->r = r;
-}
-
-DQN_trainer::Buffer::Buffer (Game_tree* tree) {
-	this->tree = tree;
-}
-
-void DQN_trainer::Buffer::fill (int capacity) {
-	int n = 0, a, b, r;
-	Node *cur = &(tree->root_node), *mid, *next;
-	Transition trans = Transition(cur, cur, 0, 0);
-
-	while (n < capacity) {
-		cur = &(tree->root_node);
-		a = rand() % (cur->last_child + 1);
-		mid = cur->children[a];
-		while (!cur->board.is_terminal()) {
-			if (!mid->board.is_terminal()) {
-				b = rand() % (mid->last_child + 1);
-				next = mid->children[b];
-			}
-			else next = mid;
-
-			trans = Transition(cur, next, a, next->board.get_reward());
-			transition.push_back(trans);
-			cur = mid;  mid = next;  a = b;
-			n++;
-		}
-	}
-}
-
 void DQN_trainer::fill_buffer (int capacity) {
-	replay_buffer.fill(capacity);
+	replay_buffer.fill_both_sides(capacity);
 }
 
 DQN_trainer::DQN_trainer (Game_tree* tree) {
 	this->tree = tree;
 	replay_buffer = Buffer(tree);
-	random_buffer = Buffer(tree);
+	replay_buffer.fill_both_sides();
 
 	Neural_net init;
 	for (int i = 0; i < DQN_K; i++) {
 		init = Neural_net();	// Initialize with random weights
 		target.push_back(init);
-	}
-
-	// Populate the random buffer
-	Tree_crawler crawler = Tree_crawler(tree);
-	crawler.reset_visits();
-	queue<Node*> node_queue;
-	Node *cur = &(tree->root_node), *next, *next2;
-	Transition trans = Transition(cur, next, 0, 0);
-	node_queue.push(cur);
-	crawler.visited_node[0] = true;
-
-	while (node_queue.size() > 0) {
-		cur = node_queue.front();
-		node_queue.pop();
-
-		for (int c = 0; c <= cur->last_child; c++) {
-			next = cur->children[c];
-            		crawler.visited_node[next->hash] = true;
-			if (!next->board.is_terminal()) {
-				for (int d = 0; d <= next->last_child; d++) {
-                   			next2 = next->children[d];
-                 			if (!crawler.visited_node[next2->hash]) {
-						trans = Transition(cur, next2, c, next2->board.get_reward());
-						random_buffer.transition.push_back(trans);
-                        			node_queue.push(next2);
-                        			crawler.visited_node[next2->hash] = true;
-                    			}
-                		}
-			}
-			else {  // next->board.is_terminal()
-                		trans = Transition(cur, next, c, next->board.get_reward());
-                		random_buffer.transition.push_back(trans);
-			}
-		}
-
 	}
 }
 
@@ -1075,14 +1177,8 @@ void DQN_trainer::train (int epochs) {
 			cur = mid;  mid = next;  a = b;
 
 			for (int batch = 0; batch < MINIBATCH_SIZE; batch++) {
-				if (dis(gen) < EPSILON) {
-					batch_draw = rand() % random_buffer.transition.size();
-					trans = random_buffer.transition[batch_draw];
-				}
-				else {
-					batch_draw = rand() % BUFFER_CAPACITY;
-					trans = replay_buffer.transition[batch_draw];
-				}
+				batch_draw = rand() % BUFFER_CAPACITY;
+				trans = replay_buffer.transition[batch_draw];
 
 				if (trans.next->board.is_terminal()) DQ_target = trans.r;
 				else {
@@ -1175,8 +1271,253 @@ int DQN_trainer::min_DQ_action (int lpos[], Neural_net* net) {
 	return min_action;
 }
 
+void DQN_trainer::load_weights(ifstream& from) {
+	string weights;
+	getline(from, weights);
+	trainer.load_weights(weights);
+}
+
 void DQN_trainer::store_weights(ofstream& to) {
 	trainer.store_weights(to);
+}
+
+
+DQN_trainer_with_two_nets::DQN_trainer_with_two_nets (Game_tree* tree) {
+	this->tree = tree;
+	replay_x = Buffer(tree);
+	replay_o = Buffer(tree);
+	fill_buffers();
+}
+
+int DQN_trainer_with_two_nets::max_DQ_action(int lpos[], Neural_net* net) {
+	double max = -INFTY;
+	int max_a;
+
+	net->layer[INPUT_LAYER].enter(lpos);
+	net->forward_pass();
+
+	for (int i = 0; i < CELLS; i++) {
+		if (!lpos[i]) {
+			if (net->layer[OUTPUT_LAYER].node[i].value > max) {
+				max = net->layer[OUTPUT_LAYER].node[i].value;
+				max_a = i;
+			}
+		}
+	}
+	return max_a;
+}
+
+int DQN_trainer_with_two_nets::min_DQ_action(int lpos[], Neural_net* net) {
+	double min = INFTY;
+	int min_a;
+
+	net->layer[INPUT_LAYER].enter(lpos);
+	net->forward_pass();
+
+	for (int i = 0; i < CELLS; i++) {
+		if (!lpos[i]) {
+			if (net->layer[OUTPUT_LAYER].node[i].value < min) {
+				min = net->layer[OUTPUT_LAYER].node[i].value;
+				min_a = i;
+			}
+		}
+	}
+	return min_a;
+}
+
+double DQN_trainer_with_two_nets::max_DQ (int lpos[], Neural_net* net) {
+	net->layer[INPUT_LAYER].enter(lpos);
+	net->forward_pass();
+	return net->layer[OUTPUT_LAYER].node[max_DQ_action(lpos, net)].value;
+}
+
+double DQN_trainer_with_two_nets::min_DQ (int lpos[], Neural_net* net) {
+	net->layer[INPUT_LAYER].enter(lpos);
+	net->forward_pass();
+	return net->layer[OUTPUT_LAYER].node[min_DQ_action(lpos, net)].value;
+}
+
+void DQN_trainer_with_two_nets::train(int epochs) {
+	double random;
+	random_device rdev;
+	mt19937 gen(rdev());
+	uniform_real_distribution<> dis(0, 1.0);
+
+	Node *cur = &(tree->root_node), *mid, *next;
+	int a, b;
+	Transition trans(cur, cur, 0, 0);
+	Transition trans_x = trans, trans_o = trans;
+	double DQ_target_x, DQ_target_o;
+	int batch_draw;
+	int action_batch_x[MINIBATCH_SIZE], action_batch_o[MINIBATCH_SIZE];
+	double DQ_value_batch_x[MINIBATCH_SIZE], DQ_value_batch_o[MINIBATCH_SIZE];
+	double target_batch_x[MINIBATCH_SIZE], target_batch_o[MINIBATCH_SIZE];
+
+	for (int ep = 0; ep < epochs; ep++) {
+		cur = &(tree->root_node);
+                if (dis(gen) < EPSILON) a = rand() % (cur->last_child + 1);
+		else a = cur->find_child_by_cell(max_DQ_action(cur->board.lpos, &trainer_x));
+		mid = cur->children[a];
+
+		while(!cur->board.is_terminal()) {
+			if (!mid->board.is_terminal()) {
+				if (dis(gen) < EPSILON) b = rand() % (mid->last_child + 1);
+				else mid->board.get_turn() == 1 ?
+					b = mid->find_child_by_cell(max_DQ_action(mid->board.lpos, &trainer_x)) :
+					b = mid->find_child_by_cell(min_DQ_action(mid->board.lpos, &trainer_o));
+				next = mid->children[b];
+			}
+			else next = mid;
+
+			trans = Transition(cur, next, a, next->board.get_reward());
+			if (cur->board.get_turn() == 1) {
+				replay_x.transition.pop_front();
+				replay_x.transition.push_back(trans);
+			}
+			else {
+				replay_o.transition.pop_front();
+				replay_o.transition.push_back(trans);
+			}
+			cur = mid;  mid = next;  a = b;
+
+			for (int batch = 0; batch < MINIBATCH_SIZE; batch++) {
+				batch_draw = rand() % BUFFER_CAPACITY;
+				trans_x = replay_x.transition[batch_draw];
+				trans_o = replay_o.transition[batch_draw];
+
+				if (trans_x.next->board.is_terminal()) DQ_target_x = trans_x.r;
+				else {
+					b = max_DQ_action(trans_x.next->board.lpos, &target_x);    // Double DQN
+					trainer_x.layer[INPUT_LAYER].enter(trans_x.next->board.lpos);
+					trainer_x.forward_pass();
+					DQ_target_x = GAMMA * trainer_x.layer[OUTPUT_LAYER].node[b].value;
+				}
+				trainer_x.layer[INPUT_LAYER].enter(trans_x.cur->board.lpos);
+				trainer_x.forward_pass();
+				action_batch_x[batch] = trans_x.cur->children_cells[trans_x.a];
+				DQ_value_batch_x[batch] = trainer_x.layer[OUTPUT_LAYER].node[action_batch_x[batch]].value;
+				target_batch_x[batch] = DQ_target_x;
+
+				if (trans_o.next->board.is_terminal()) DQ_target_o = trans_o.r;
+				else {
+					b = min_DQ_action(trans_o.next->board.lpos, &target_o);
+					trainer_o.layer[INPUT_LAYER].enter(trans_o.next->board.lpos);
+					trainer_o.forward_pass();
+					DQ_target_o = GAMMA * trainer_o.layer[OUTPUT_LAYER].node[b].value;
+				}
+				trainer_o.layer[INPUT_LAYER].enter(trans_o.cur->board.lpos);
+				trainer_o.forward_pass();
+				action_batch_o[batch] = trans_o.cur->children_cells[trans_o.a];
+				DQ_value_batch_o[batch] = trainer_o.layer[OUTPUT_LAYER].node[action_batch_o[batch]].value;
+				target_batch_o[batch] = DQ_target_o;
+			}
+			trainer_x.backward_pass(action_batch_x, DQ_value_batch_x, target_batch_x);
+			trainer_o.backward_pass(action_batch_o, DQ_value_batch_o, target_batch_o);
+		}
+		if (ep % TARGET_UPDATE_FREQUENCY == 0) {
+			target_x = trainer_x; target_o = trainer_o;
+		}
+		t++;
+                if (t % (DQN_ALPHA_UPDATE_FREQ) == 0) {
+			trainer_x.ALPHA *= DQN_ALPHA_SCALE; trainer_o.ALPHA *= DQN_ALPHA_SCALE;
+		}
+	}
+}
+
+void DQN_trainer_with_two_nets::store_DQ_actions (Game_tree* tree) {
+	Tree_crawler crawler = Tree_crawler(tree);
+	crawler.reset_visits();
+
+	Node* node = &(tree->root_node);
+	queue<Node*> node_queue;
+	node_queue.push(node);
+	crawler.visited_node[0] = true;
+	int cell;
+
+	while (node_queue.size() > 0) {
+		node = node_queue.front();
+		node_queue.pop();
+		if (!node->board.is_terminal()) {
+			if (node->board.get_turn() == 1) {
+				trainer_x.layer[INPUT_LAYER].enter(node->board.lpos);
+				trainer_x.forward_pass();
+				node->DQ_move = node->find_child_by_cell( max_DQ_action(node->board.lpos, &trainer_x) );
+			}
+			else {
+				trainer_o.layer[INPUT_LAYER].enter(node->board.lpos);
+				trainer_o.forward_pass();
+				node->DQ_move = node->find_child_by_cell( min_DQ_action(node->board.lpos, &trainer_o) );
+			}
+			for (int i = 0; i <= node->last_child; i++) {
+				cell = node->children_cells[i];
+				node->DQ_values[cell] = node->board.get_turn() == 1 ?
+						      trainer_x.layer[OUTPUT_LAYER].node[cell].value :
+						      trainer_o.layer[OUTPUT_LAYER].node[cell].value ;
+				if (!crawler.visited_node[node->children[i]->hash]) {
+					node_queue.push(node->children[i]);
+					crawler.visited_node[node->children[i]->hash] = true;
+				}
+			}
+		}
+	}
+}
+
+void DQN_trainer_with_two_nets::fill_buffers (int capacity) {
+	replay_x.fill_one_side(capacity, false);
+	replay_o.fill_one_side(capacity, true);
+}
+
+void DQN_trainer_with_two_nets::store_weights (ofstream& to) {
+	trainer_x.store_weights(to);
+	trainer_o.store_weights(to);
+}
+
+void DQN_trainer_with_two_nets::load_weights (ifstream& from) {
+	string weights, xweights, oweights;
+	getline(from, weights);
+	size_t semicolon = weights.find(';');
+	xweights = weights.substr(0, semicolon + 1);
+	oweights = weights.substr(semicolon + 1);
+	trainer_x.load_weights(xweights);
+	trainer_o.load_weights(oweights);
+}
+
+void DQN_trainer_with_two_nets::find_Q_bounds () {
+	Tree_crawler crawler = Tree_crawler(tree);
+	crawler.reset_visits();
+
+	Node* node = &(tree->root_node);
+	queue<Node*> node_queue;
+	node_queue.push(node);
+	crawler.visited_node[0] = true;
+
+	double cur_Q;
+	high_Q = -INFTY; low_Q = INFTY;
+
+	while (node_queue.size() > 0) {
+		node = node_queue.front();
+		node_queue.pop();
+		if (!node->board.is_terminal()) {
+			if (node->board.get_turn() == 1) {
+				trainer_x.layer[INPUT_LAYER].enter(node->board.lpos);
+				trainer_x.forward_pass();
+				cur_Q = max_DQ(node->board.lpos, &trainer_x);
+				if (cur_Q > high_Q) high_Q = cur_Q;
+			}
+			else {
+				trainer_o.layer[INPUT_LAYER].enter(node->board.lpos);
+				trainer_o.forward_pass();
+				cur_Q = min_DQ(node->board.lpos, &trainer_o);
+				if (cur_Q < low_Q) low_Q = cur_Q;
+			}
+			for (int i = 0; i <= node->last_child; i++) {
+				if (!crawler.visited_node[node->children[i]->hash]) {
+					node_queue.push(node->children[i]);
+					crawler.visited_node[node->children[i]->hash] = true;
+				}
+			}
+		}
+	}
 }
 
 // *********************************************************************************
@@ -1732,13 +2073,15 @@ Q_values operator+(Q_values Q1, Q_values Q2) {
 	return Q_sum;
 }
 
-wlt Q_trainer::battle (strategy plstrat, strategy compstrat) {
+wlt Q_trainer::battle (strategy plstrat, strategy compstrat, bool initrand) {
 	wlt ledger;
 	Node* battle = &(tree.root_node);
 	for (int i = 0; i < NUMBATTLES; i++) {
 		battle = &(tree.root_node);
-		//battle = battle->next_move_node(RANDOM);            // Randomize initial move
-		//battle = battle->next_move_node(compstrat);
+		if (initrand) {
+			battle = battle->next_move_node(RANDOM);            // Randomize initial move
+			battle = battle->next_move_node(compstrat);
+		}
 		while ( !battle->board.is_terminal() ) {
 			battle = battle->next_move_node(plstrat);
 			if (battle->board.is_terminal()) {
@@ -1767,11 +2110,11 @@ wlt Q_trainer::battle (strategy plstrat, strategy compstrat) {
 	return ledger;
 }
 
-float_wlt Q_trainer::battle (strategy plstrat, strategy compstrat, int numit) {
+float_wlt Q_trainer::battle (strategy plstrat, strategy compstrat, int numit, bool initrand) {
 	wlt total_ledger, cur_game_ledger;
 
 	for (int i = 0; i < numit; i++) {
-		cur_game_ledger = battle(plstrat, compstrat);
+		cur_game_ledger = battle(plstrat, compstrat, initrand);
 		total_ledger = total_ledger + cur_game_ledger;
 	}
 
@@ -2490,6 +2833,7 @@ void Exporter::output_html_strategy_table (char file_name[], bool breadth) {
 	string opti_class;
 	string opti_moves;
 	double Q_values[CELLS];
+	double DQ_values[CELLS];
 	ostringstream terminal_positions;
 	ofstream to (file_name);
 
@@ -2497,6 +2841,14 @@ void Exporter::output_html_strategy_table (char file_name[], bool breadth) {
         breadth ? crawler.find_orbits_breadthfirst() : crawler.find_orbits();
 	crawler.compute_opti_moves();
 
+	DQN_trainer_with_two_nets tr(&Q.tree);
+	ifstream weights("weights1280.txt");
+	tr.load_weights(weights);
+	weights.close();
+	tr.store_DQ_actions(&Q.tree);
+	tr.find_Q_bounds();
+	cout << "High DQ: " << tr.high_Q << endl;
+	cout << "Low DQ: " << tr.low_Q << endl;
 
 	to << "<!DOCTYPE html>" << endl;
 	to << "<html>" << endl;
@@ -2507,7 +2859,10 @@ void Exporter::output_html_strategy_table (char file_name[], bool breadth) {
 	to << "</head>" << endl;
 	to << "<body>" << endl;
 
-	to << "The board cells are enumerated as follows:" << endl;
+	if (breadth) to << "<h1> Breadth-first pass of Tic-Tac-Toe game tree </h1>" << endl;
+	else to << "<h1> Depth-first pass of Tic-Tac-Toe game tree </h1>" << endl;
+	to << "<p> << Back to <a href=\"http://iliasmirnov.com/ttt/\">the project page</a> </p>" << endl;
+	to << "<p>The board cells are enumerated as follows:</p>" << endl;
 	to << "<table id=\"board\">" << endl;
 		to << "<tr>" << endl;
 			to << "<td> 0 </td> <td> 1 </td> <td> 2 </td>" << endl;
@@ -2517,6 +2872,10 @@ void Exporter::output_html_strategy_table (char file_name[], bool breadth) {
 			to << "<td> 6 </td> <td> 7 </td> <td> 8 </td>" << endl;
 		to << "</tr>" << endl;
 	to << "</table>" << endl;
+	to << "<p> Red cells indicate the moves judged poor (leading to a loss) by the agent; green cells those judged"
+	   << " good (leading to a win); yellow cells those leading to a tie. The remaining colors are interpolated between these three."
+           << " Colors of the DQN evaluations are based on the relative position of the DQN value relative to the highest and lowest"
+	   << " DQN values, which are " << tr.high_Q << " and " << tr.low_Q << ", respectively. </p>" << endl;
 	to << "<h2> Non-terminal positions </h2>" << endl;
 	to << "<table id=\"row-of-boards\">" << endl;
 	to << "<tr>" << endl;
@@ -2524,8 +2883,9 @@ void Exporter::output_html_strategy_table (char file_name[], bool breadth) {
 		to << "<td> Orbit representative </td>" << endl;
 		to << "<td> Whose <br> move? </td>" << endl;
 		to << "<td> Optibot classification <br> of best moves <br> (Optibot-approved moves) </td>" << endl;
-		to << "<td> Minimax utilities</td>" << endl;
-		to << "<td> <i>Q</i> values </td>" << endl;
+		to << "<td width=\"130\"> Minimax utilities</td>" << endl;
+		to << "<td width=\"130\"> <i>Q</i> values </td>" << endl;
+		to << "<td width=\"130\"> DQN values </td>" << endl;
 		to << "<td> Other boards in the orbit </td>" << endl;
 	to << "</tr>" << endl;
 	for (int i = 0; i < crawler.orbits.size(); i++) {
@@ -2608,6 +2968,13 @@ void Exporter::output_html_strategy_table (char file_name[], bool breadth) {
 			}
 			to << "<td>" << endl;
 				print_Q_board_to_html(Q_values, board.get_turn(), to, false);
+			to << "</td>" << endl;
+
+			// DQN-move
+			to << "<td>" << endl;
+				for (int i = 0; i < CELLS; i++) DQ_values[i] = INFTY;
+				for (int i = 0; i <= node->last_child; i++) DQ_values[node->children_cells[i]] = node->DQ_values[node->children_cells[i]];
+				print_DQN_board_to_html(DQ_values, board.get_turn(), to, tr.low_Q, tr.high_Q - tr.low_Q, false);
 			to << "</td>" << endl;
 
 			//to << "<td>" + to_string( node->children_cells[node->double_TQ_move] ) + "</td>" << endl;
@@ -2797,6 +3164,69 @@ void Exporter::print_Q_board_to_html(double Q_values[], int turn, ofstream& to, 
 		to << "</table>" << endl;
 }
 
+void Exporter::print_DQN_board_to_html(double DQ_values[], int turn, ofstream& to, double DQ_low, double DQ_range, bool small) {
+	string red[10];
+	string green[10];
+
+	for (int i = 0; i < 10; i++) {
+		red[i] = "rgb(255," + to_string( 204 - 20*(i+1)) + ",0)";
+		green[i] = "rgb(" + to_string( 255 - 25*(i+1)) + "," + to_string( 204 - 5*(i+1)) + ",0)";
+	}
+	string yellow = "rgb(255, 204, 0)";
+	string grey = "rgb(240, 240, 240)";
+
+	int DQ_value_color_level[CELLS];
+	string x_color[CELLS], o_color[CELLS];
+	string x_cell[CELLS], o_cell[CELLS];
+	string tie_cell = "<td style = \"background : " + yellow  + "\">";
+	string used_cell = "<td style = \"background : " + grey + "\">";
+
+	for (int i = 0; i < CELLS; i++) {
+		DQ_value_color_level[i] = abs(roundf( (DQ_values[i]-DQ_low)/DQ_range * 10 )) - 1;
+		DQ_value_color_level[i] = max(0, DQ_value_color_level[i]);
+		DQ_value_color_level[i] = min(9, DQ_value_color_level[i]);
+		switch (turn) {
+			case 1  : x_color[i] = green[ DQ_value_color_level[i] ];
+				  o_color[i] = red[ DQ_value_color_level[i] ];
+				  break;
+			case -1 : x_color[i] = red[ DQ_value_color_level[i] ];
+				  o_color[i] = green[ DQ_value_color_level[i] ];
+				  break;
+		}
+		x_cell[i] = "<td style = \"background : " + x_color[i] + "\">";
+		o_cell[i] = "<td style = \"background : " + o_color[i] + "\">";
+
+	}
+	int lead = 0;
+	ostringstream stream;
+	string lpos[CELLS];
+		for (int n = 0; n < CELLS; n++) {
+			if (0 < DQ_values[n] and DQ_values[n] < INFTY) lead = 1;
+			else if (DQ_values[n] == 0) lead = 0;
+			else if (DQ_values[n] < 0) lead = -1;
+			else lead = INFTY;
+			stream << fixed << setprecision(1) << DQ_values[n];
+			lpos[n] = stream.str();
+			stream.str("");
+			switch(lead) {
+				case 1  :  lpos[n] = x_cell[n] + lpos[n] + "</td>";
+					   break;
+				case -1 :  lpos[n] = o_cell[n] + lpos[n] + "</td>";
+					   break;
+				case 0  :  lpos[n] = tie_cell + "0.0</td>";
+					   break;
+				default :  lpos[n] = used_cell + "</td>";
+					   break;
+			}
+		}
+	if (small) to << "<table id=\"board-small\">" << endl;
+	else	   to << "<table id=\"board\" style=\"font-size : 10pt\">" << endl;
+		to << "<tr>" + lpos[0] + lpos[1] + lpos[2] + "</tr>" << endl;
+		to << "<tr>" + lpos[3] + lpos[4] + lpos[5] + "</tr>" << endl;
+		to << "<tr>" + lpos[6] + lpos[7] + lpos[8] + "</tr>" << endl;
+		to << "</table>" << endl;
+}
+
 void Exporter::print_board_to_string(Board board, ostringstream& tp, bool small) {
 	string lpos[CELLS];
 		for (int n = 0; n < CELLS; n++) {
@@ -2835,6 +3265,8 @@ void fill_strat(Game_tree& tree, int* strat_array, strategy STRAT) {
                                  break;
             case HEURIBOT   :    move = cur_node->opti_move;
                                  break;
+	    case QTAB       :    move = cur_node->TQ_move;
+				 break;
             case DOUBLEQ    :    move = cur_node->double_TQ_move;
                                  break;
             case DQN        :    move = cur_node->DQ_move;
@@ -2851,4 +3283,16 @@ void fill_strat(Game_tree& tree, int* strat_array, strategy STRAT) {
                 marked_to_visit[child_node->hash] = true;
         }
     }
+}
+
+string strat2name (strategy strat) {
+	switch(strat) {
+		case    MINIMAX    :    return "Minimax";
+		case    RANDOM     :    return "Random";
+		case    QTAB       :    return "Single Q-learning (Tabular)";
+		case    DOUBLEQ    :    return "Double Q-learning (Tabular)";
+		case    DQN        :    return "DQN";
+		case    HEURIBOT   :    return "Heuribot";
+		default            :    return "ERROR: Invalid strategy";
+	}
 }
